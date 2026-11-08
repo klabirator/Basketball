@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS = {
   lastMode: 'free',
   modeOpts: { shots: 50, minutes: 10, program: 'mid5', perSpot: 10 },
   seenHelp: false,
+  videoSpeed: 1,
 };
 
 function read(key, fallback) {

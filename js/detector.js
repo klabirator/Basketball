@@ -87,6 +87,16 @@ export class ShotDetector {
     this.shot = null;
   }
 
+  /** Сброс временной шкалы (перемотка видео): треки и бросок сбрасываются, кольцо остаётся. */
+  resetTime() {
+    this.lastT = null;
+    this.tracks = [];
+    this.shot = null;
+    this.cooldownUntil = 0;
+    this.suspendUntil = 0;
+    this.bgReady = false;
+  }
+
   /** Отменить текущий бросок и не засчитывать ничего в течение ms. */
   suspend(ms) {
     this.shot = null;

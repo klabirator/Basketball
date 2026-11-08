@@ -244,3 +244,25 @@ table.spots td:last-child, table.spots th:last-child { text-align: right; }
 .toast { position: fixed; left: 50%; bottom: calc(100px + var(--safe-b)); transform: translateX(-50%) translateY(20px);
   background: #000d; color: #fff; padding: 12px 18px; border-radius: 14px; opacity: 0; transition: .3s; pointer-events: none; z-index: 60; max-width: 90vw; text-align: center; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ───────── Проверка на видео ───────── */
+.btn-video {
+  display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin-top: 10px;
+  border: 2px solid var(--line); border-radius: 18px; padding: 15px; font-size: 18px; font-weight: 600;
+  background: var(--card); cursor: pointer;
+}
+.btn-video:active { transform: scale(.98); }
+.hint.center { text-align: center; }
+.video-bar {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(76px + var(--safe-b));
+  width: min(96vw, 640px); display: flex; align-items: center; gap: 8px;
+  background: rgba(20, 22, 28, .88); border-radius: 18px; padding: 8px;
+}
+.video-bar input[type=range] { flex: 1; min-width: 60px; accent-color: var(--accent); }
+.video-bar .cbtn { height: 44px; min-width: 44px; font-size: 18px; }
+.v-time { font-size: 13px; color: var(--muted); white-space: nowrap; }
+@media (orientation: portrait) { .video-bar { bottom: calc(140px + var(--safe-b)); } }
+.events { list-style: none; padding: 0; margin: 0; }
+.events li { display: flex; justify-content: space-between; padding: 8px 4px; border-bottom: 1px solid var(--line); }
+.events .m { color: var(--ok); font-weight: 700; }
+.events .x { color: var(--bad); font-weight: 700; }

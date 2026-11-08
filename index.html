@@ -49,6 +49,12 @@
       <span>▶</span> Начать тренировку
     </button>
 
+    <label class="btn-video" id="btn-video">
+      <span>🎬</span> Проверить на видео
+      <input type="file" id="video-file" accept="video/*" hidden>
+    </label>
+    <p class="hint center">Загрузите запись броска — приложение покажет, что распознало и как посчитало.</p>
+
     <nav class="home-nav">
       <button class="nav-btn" data-go="history"><span>📈</span>История</button>
       <button class="nav-btn" data-go="settings"><span>⚙️</span>Настройки</button>
@@ -82,6 +88,14 @@
 
       <div id="center-msg" class="center-msg hidden"></div>
       <div id="last-result" class="last-result"></div>
+    </div>
+
+    <div class="video-bar hidden" id="video-bar">
+      <button class="cbtn" id="v-restart" aria-label="Сначала">⟲</button>
+      <button class="cbtn" id="v-play" aria-label="Пауза">❚❚</button>
+      <input type="range" id="v-seek" min="0" max="1000" value="0" aria-label="Перемотка">
+      <span class="mono v-time" id="v-time">0:00 / 0:00</span>
+      <button class="cbtn wide mono" id="v-speed" aria-label="Скорость">1×</button>
     </div>
 
     <div class="controls" id="controls">

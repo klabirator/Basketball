@@ -43,6 +43,10 @@ let running = false;
 let wakeLock = null;
 let historyView = 'sessions';
 let lastSummaryId = null;
+let lastVideoFile = null; // для «Ещё раз» после проверки на видео
+let videoUrl = null;
+let lastVideoT = -1;
+const SPEEDS = [0.5, 1, 2];
 
 const Z = { total: 1, fx: 0.5, fy: 0.5 }; // фокус — в «базовых» нормированных координатах (при аппаратном зуме 1)
 const V = { vw: 0, vh: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, pw: 0, ph: 0, hw: 1 };
@@ -194,13 +198,15 @@ function modeLabel() {
   }
 }
 
-async function startTraining() {
+async function startTraining(videoFile = null) {
   const o = settings.modeOpts;
-  const mode = settings.lastMode;
+  const mode = videoFile ? 'free' : settings.lastMode;
   T = {
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
     mode,
-    modeLabel: modeLabel(),
+    modeLabel: videoFile ? 'Проверка на видео' : modeLabel(),
+    video: videoFile ? { name: videoFile.name } : null,
+    events: [],
     target: mode === 'shots' ? o.shots : null,
     durationMs: mode === 'time' ? o.minutes * 60000 : null,
     spots: mode === 'spots' ? PROGRAMS[o.program].spots.slice() : null,
@@ -221,12 +227,32 @@ async function startTraining() {
   };
   go('train');
   updateScore();
-  setStatus('Запуск камеры…');
-  showCenter('Запуск камеры…');
+  $('#video-bar').classList.toggle('hidden', !videoFile);
+  $('#b-pause').textContent = '❚❚';
   voice.enabled = settings.voiceMode !== 'off';
-  voice.say('Наведите камеру на кольцо', { interrupt: true });
 
-  try {
+  if (videoFile) {
+    lastVideoFile = videoFile;
+    setStatus('Открываю видео…');
+    showCenter('Открываю видео…');
+    try {
+      await openVideo(videoFile);
+    } catch (e) {
+      showCenter(`Не удалось открыть видео.<small>${esc(e?.message || 'Формат не поддерживается этим браузером. Попробуйте MP4 (H.264) или WebM.')}</small>`);
+      setStatus('Ошибка видео', 'bad');
+      setTimeout(() => {
+        if (T && !T.shots.length) {
+          closeVideo();
+          T = null;
+          go('home');
+        }
+      }, 5000);
+      return;
+    }
+  } else try {
+    setStatus('Запуск камеры…');
+    showCenter('Запуск камеры…');
+    voice.say('Наведите камеру на кольцо', { interrupt: true });
     await camera.start({ resolution: settings.resolution });
   } catch (e) {
     const denied = e?.name === 'NotAllowedError';
@@ -253,6 +279,7 @@ async function startTraining() {
   Z.fx = 0.5;
   Z.fy = 0.5;
   V.vw = 0;
+  lastVideoT = -1;
   if (camera.hwCaps) await camera.setHwZoom(camera.hwCaps.min <= 1 ? 1 : camera.hwCaps.min);
   setStatus('Ищу кольцо…', 'warn');
   showCenter('Ищу кольцо…<small>Кольцо должно быть в кадре целиком. Если не находится — нажмите ◎ и коснитесь его.</small>');
@@ -264,6 +291,37 @@ async function startTraining() {
   bumpControls();
 }
 
+async function openVideo(file) {
+  camera.stop();
+  closeVideo();
+  videoUrl = URL.createObjectURL(file);
+  $('#video-bar').classList.remove('hidden');
+  video.srcObject = null;
+  video.muted = true;
+  video.loop = false;
+  video.src = videoUrl;
+  await new Promise((res, rej) => {
+    const ok = () => (video.videoWidth ? res() : rej(new Error('В файле нет видеодорожки.')));
+    video.addEventListener('loadedmetadata', ok, { once: true });
+    video.addEventListener('error', () => rej(null), { once: true });
+  });
+  video.playbackRate = settings.videoSpeed || 1;
+  $('#v-speed').textContent = `${video.playbackRate}×`;
+  await video.play();
+  $('#v-play').textContent = '❚❚';
+}
+
+function closeVideo() {
+  if (videoUrl) {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(videoUrl);
+    videoUrl = null;
+  }
+  $('#video-bar').classList.add('hidden');
+}
+
 function scheduleFrame() {
   if (!running) return;
   if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
@@ -271,9 +329,17 @@ function scheduleFrame() {
 }
 
 let frameNo = 0;
-function onFrame() {
+function onFrame(_ts, meta) {
   if (!running) return;
   scheduleFrame();
+  // В режиме видео время берётся из таймкода ролика: скорость и перемотка не искажают физику полёта.
+  let vt = null;
+  if (T?.video) {
+    vt = (meta?.mediaTime ?? video.currentTime) * 1000;
+    if (vt === lastVideoT) return;
+    if (vt < lastVideoT) detector.resetTime();
+    lastVideoT = vt;
+  }
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return;
   if (vw !== V.vw || vh !== V.vh) {
@@ -290,7 +356,7 @@ function onFrame() {
     pctx.drawImage(video, c.x, c.y, c.w, c.h, 0, 0, V.pw, V.ph);
     const img = pctx.getImageData(0, 0, V.pw, V.ph);
     detector.counting = isCounting(now);
-    lastRes = detector.process(img.data, V.pw, V.ph, now);
+    lastRes = detector.process(img.data, V.pw, V.ph, vt ?? now);
     procAvg = procAvg * 0.9 + (performance.now() - t0) * 0.1;
     if (detector.rimLocked && detector.rim) rimBase = procToBase(detector.rim);
     for (const e of lastRes.events) handleEvent(e, now);
@@ -388,9 +454,9 @@ function handleEvent(e, now) {
     setStatus('Кольцо найдено', 'ok');
     if (!T.started) {
       T.started = true;
-      T.goAt = now + START_DELAY;
+      T.goAt = now + (T.video ? 0 : START_DELAY);
       T.lastTick = now;
-      voice.say(T.spots ? `Кольцо найдено. Первая точка: ${T.spots[0]}. Старт через 5 секунд` : 'Кольцо найдено. Старт через 5 секунд', { interrupt: true });
+      if (!T.video) voice.say(T.spots ? `Кольцо найдено. Первая точка: ${T.spots[0]}. Старт через 5 секунд` : 'Кольцо найдено. Старт через 5 секунд', { interrupt: true });
     } else {
       voice.say('Кольцо найдено', { interrupt: true });
     }
@@ -409,6 +475,7 @@ function registerShot(r, manual) {
   if (!T || T.finished) return;
   const now = performance.now();
   tickTime(now);
+  if (T.video) T.events.push({ vt: video.currentTime, r, m: manual });
   T.shots.push({ t: Math.round(T.activeMs), r, ...(T.spots ? { spot: T.spotIdx } : {}), ...(manual ? { m: 1 } : {}) });
   T.streak = r ? T.streak + 1 : 0;
   if (T.spots) T.spotShots++;
@@ -565,6 +632,10 @@ function pauseTraining(reason = 'user') {
   tickTime(performance.now());
   T.paused = reason;
   detector.suspend(100);
+  if (T.video) {
+    video.pause();
+    $('#v-play').textContent = '▶';
+  }
   $('#b-pause').textContent = '▶';
   if (reason === 'user') {
     showCenter('Пауза<small>Скажите «продолжить» или нажмите ▶</small>');
@@ -582,6 +653,12 @@ function resumeTraining() {
   T.paused = null;
   $('#b-pause').textContent = '❚❚';
   hideCenter();
+  if (T.video) {
+    video.play().catch(() => {});
+    $('#v-play').textContent = '❚❚';
+    voice.cancel();
+    return;
+  }
   detector.suspend(800);
   voice.say('Продолжаем', { interrupt: true });
 }
@@ -592,6 +669,7 @@ function finishTraining() {
   T.finished = true;
   running = false;
   camera.stop();
+  closeVideo();
   commands.stop();
   releaseWakeLock();
   closeModal();
@@ -607,19 +685,40 @@ function finishTraining() {
     ...(T.spots ? { spots: T.spots, perSpot: T.perSpot } : {}),
   };
   const prev = aggregate(loadSessions());
-  if (st.attempts) saveSession(session);
+  const isVideo = !!T.video;
+  if (st.attempts && !isVideo) saveSession(session);
   sound.play('end');
   voice.say(st.attempts ? `Тренировка завершена. ${st.makes} из ${st.attempts}, ${st.pct} процентов` : 'Тренировка завершена', {
     interrupt: true,
     delay: 300,
   });
-  lastSummaryId = st.attempts ? session.id : null;
-  $('#summary-body').innerHTML = st.attempts
-    ? renderSessionDetail(session, { compareTo: prev.attempts >= 20 ? prev.pct : null }) + recordNote(session, prev)
-    : `<div class="empty">Ни одного броска не засчитано — тренировка не сохранена.</div>`;
-  $('#sum-share').classList.toggle('hidden', !st.attempts);
+  lastSummaryId = st.attempts && !isVideo ? session.id : null;
+  if (!isVideo) lastVideoFile = null;
+  $('#summary-body').innerHTML = isVideo
+    ? videoReport(session, T)
+    : st.attempts
+      ? renderSessionDetail(session, { compareTo: prev.attempts >= 20 ? prev.pct : null }) + recordNote(session, prev)
+      : `<div class="empty">Ни одного броска не засчитано — тренировка не сохранена.</div>`;
+  $('#sum-share').classList.toggle('hidden', !lastSummaryId);
+  $('#sum-again').textContent = isVideo ? '⟲ Прогнать это видео ещё раз' : '▶ Ещё тренировка';
   T = null;
   go('summary');
+}
+
+function videoReport(session, t) {
+  const st = sessionStats(session);
+  const rows = t.events.length
+    ? `<ul class="events">${t.events
+        .map((e) => `<li><span class="mono">${fmtDur(e.vt * 1000)}</span><span class="${e.r ? 'm' : 'x'}">${e.r ? 'Попадание' : 'Промах'}${e.m ? ' (вручную)' : ''}</span></li>`)
+        .join('')}</ul>`
+    : '<p class="hint">Бросков не найдено. Проверьте, что кольцо целиком в кадре и над ним видна дуга мяча; попробуйте другую чувствительность в настройках.</p>';
+  return `<div class="card">
+      <div class="big-sub">🎬 ${esc(t.video.name)}</div>
+      <div class="big-pct">${st.attempts ? st.pct + '%' : '—'}</div>
+      <div class="big-sub"><b style="color:var(--ok)">${st.makes}</b> из <b>${st.attempts}</b></div>
+    </div>
+    <div class="card"><div class="opt-title">Что распознано (время в ролике)</div>${rows}</div>
+    <p class="hint">Проверка на видео не сохраняется в историю тренировок.</p>`;
 }
 
 function recordNote(s, prev) {
@@ -632,8 +731,60 @@ function recordNote(s, prev) {
 
 $('#sum-again').addEventListener('click', () => {
   sound.unlock();
-  startTraining();
+  startTraining(lastVideoFile);
 });
+
+// ── Проверка на видео ──
+$('#video-file').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  sound.unlock();
+  startTraining(f);
+});
+function toggleVideo() {
+  if (!T?.video) return;
+  if (video.paused || T.paused) T.paused ? resumeTraining() : video.play();
+  else pauseTraining('user');
+}
+$('#v-play').addEventListener('click', toggleVideo);
+$('#v-restart').addEventListener('click', () => {
+  if (!T?.video) return;
+  T.shots = [];
+  T.events = [];
+  T.streak = 0;
+  T.activeMs = 0;
+  updateScore();
+  video.currentTime = 0;
+  detector.resetTime();
+  if (T.paused) resumeTraining();
+  else video.play().catch(() => {});
+  toast('Проверка заново');
+});
+$('#v-speed').addEventListener('click', () => {
+  const i = (SPEEDS.indexOf(video.playbackRate) + 1) % SPEEDS.length;
+  video.playbackRate = SPEEDS[i];
+  settings.videoSpeed = SPEEDS[i];
+  saveSettings(settings);
+  $('#v-speed').textContent = `${SPEEDS[i]}×`;
+});
+let seeking = false;
+$('#v-seek').addEventListener('input', () => {
+  seeking = true;
+  if (video.duration) video.currentTime = (Number($('#v-seek').value) / 1000) * video.duration;
+});
+$('#v-seek').addEventListener('change', () => {
+  seeking = false;
+  detector.resetTime();
+});
+video.addEventListener('ended', () => {
+  if (T?.video && !T.finished) setTimeout(() => T?.video && finishTraining(), 900);
+});
+setInterval(() => {
+  if (!T?.video || !video.duration) return;
+  $('#v-time').textContent = `${fmtDur(video.currentTime * 1000)} / ${fmtDur(video.duration * 1000)}`;
+  if (!seeking) $('#v-seek').value = String(Math.round((video.currentTime / video.duration) * 1000));
+}, 250);
 $('#sum-share').addEventListener('click', async () => {
   const s = loadSessions().find((x) => x.id === lastSummaryId);
   if (!s) return;
@@ -676,7 +827,7 @@ function onVoiceCommand(cmd) {
 $('#m-make').addEventListener('click', () => registerShot(1, true));
 $('#m-miss').addEventListener('click', () => registerShot(0, true));
 $('#m-undo').addEventListener('click', undoShot);
-$('#b-pause').addEventListener('click', () => (T?.paused === 'user' ? resumeTraining() : pauseTraining('user')));
+$('#b-pause').addEventListener('click', () => (T?.video ? toggleVideo() : T?.paused === 'user' ? resumeTraining() : pauseTraining('user')));
 $('#b-stop').addEventListener('click', () => {
   if (!T) return;
   if (!T.shots.length) return finishTraining();
@@ -939,8 +1090,11 @@ document.addEventListener('visibilitychange', () => {
       $('#b-pause').textContent = '❚❚';
       detector.resetBackground();
       detector.suspend(1000);
+      if (T.video) $('#v-play').textContent = '❚❚';
     }
-    if (!video.srcObject?.active && running) camera.start({ resolution: settings.resolution }).then(() => applyView()).catch(() => {});
+    if (T.video) {
+      if (T.paused === null) video.play().catch(() => {});
+    } else if (!video.srcObject?.active && running) camera.start({ resolution: settings.resolution }).then(() => applyView()).catch(() => {});
   }
 });
 

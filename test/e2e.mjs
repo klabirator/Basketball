@@ -3,6 +3,7 @@
 import { createServer } from 'node:http';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,12 +17,12 @@ const SHOTS = ['make', 'miss-left', 'make', 'rim-out', 'make', 'miss-right'];
 const EXPECT = SHOTS.map((s) => (s === 'make' ? 1 : 0));
 const W = 480, H = 270, FPS = 30, LEAD = 9, GAP = 2.6;
 
-async function writeY4M(path) {
+async function writeY4M(path, shots = SHOTS, lead = LEAD) {
   const scene = makeScene(W, H);
   const out = createWriteStream(path);
   out.write(`YUV4MPEG2 W${W} H${H} F${FPS}:1 Ip A1:1 C420jpeg\n`);
   const Y = Buffer.alloc(W * H), U = Buffer.alloc((W / 2) * (H / 2)), V = Buffer.alloc((W / 2) * (H / 2));
-  for (const { data } of scenario(scene, SHOTS, { fps: FPS, lead: LEAD, gap: GAP, tail: 3 })) {
+  for (const { data } of scenario(scene, shots, { fps: FPS, lead, gap: GAP, tail: 3 })) {
     for (let i = 0; i < W * H; i++) {
       const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
       Y[i] = Math.max(0, Math.min(255, 0.299 * r + 0.587 * g + 0.114 * b));
@@ -90,8 +91,29 @@ try {
   await page.click('#screen-summary [data-go="history"]');
   await page.waitForSelector('.sess');
   await page.screenshot({ path: join(root, 'test', 'e2e-history.png') });
-  if (errors.length) throw new Error('Ошибки на странице: ' + errors.join('; '));
   if (JSON.stringify(shots) !== JSON.stringify(EXPECT)) throw new Error('Счёт не совпал');
+
+  // ── Проверка на загруженном видео ──
+  const VSHOTS = ['make', 'miss-right', 'make', 'rim-out'];
+  const VEXPECT = ['Попадание', 'Промах', 'Попадание', 'Промах'];
+  const y4m2 = join(dir, 'clip.y4m'), webm = join(dir, 'clip.webm');
+  await writeY4M(y4m2, VSHOTS, 3);
+  execFileSync('ffmpeg', ['-loglevel', 'error', '-y', '-i', y4m2, '-c:v', 'libvpx', '-b:v', '3M', '-deadline', 'good', webm]);
+  await page.click('#screen-history [data-go="home"]');
+  await page.setInputFiles('#video-file', webm);
+  for (const speed of ['1×', '2×']) {
+    await page.waitForSelector('#screen-summary.active', { timeout: 40000 });
+    const got = await page.$$eval('.events li span:last-child', (els) => els.map((e) => e.textContent));
+    console.log(`видео ${speed}:`, JSON.stringify(got));
+    if (speed === '1×') await page.screenshot({ path: join(root, 'test', 'e2e-video.png') });
+    if (JSON.stringify(got) !== JSON.stringify(VEXPECT)) throw new Error(`Видео ${speed}: распознано не то`);
+    if (speed === '1×') {
+      await page.click('#sum-again');
+      await page.waitForSelector('#screen-train.active');
+      await page.click('#v-speed'); // 1× → 2×
+    }
+  }
+  if (errors.length) throw new Error('Ошибки на странице: ' + errors.join('; '));
   void found;
   console.log('E2E OK');
 } finally {

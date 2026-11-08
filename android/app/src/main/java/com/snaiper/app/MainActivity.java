@@ -105,11 +105,18 @@ public class MainActivity extends Activity {
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = callback;
+                // Тип файла берётся из accept: видео для проверки или JSON для импорта истории.
+                String[] accept = params.getAcceptTypes();
+                String type = "*/*";
+                if (accept != null) for (String a : accept) {
+                    if (a == null) continue;
+                    if (a.startsWith("video")) { type = "video/*"; break; }
+                }
                 Intent i = new Intent(Intent.ACTION_GET_CONTENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("*/*");
+                i.setType(type);
                 try {
-                    startActivityForResult(Intent.createChooser(i, "Файл истории"), REQ_FILE);
+                    startActivityForResult(Intent.createChooser(i, "video/*".equals(type) ? "Видео для проверки" : "Файл истории"), REQ_FILE);
                 } catch (Exception e) {
                     fileCallback = null;
                     return false;

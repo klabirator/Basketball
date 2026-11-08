@@ -84,6 +84,8 @@ export class Camera {
     if (this.stream) for (const t of this.stream.getTracks()) t.stop();
     this.stream = null;
     this.track = null;
+    this.hwCaps = null;
+    this.hw = 1;
     this.video.srcObject = null;
   }
 }
