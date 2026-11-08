@@ -1,0 +1,19 @@
+{
+  "name": "Снайпер — тренировка бросков",
+  "short_name": "Снайпер",
+  "description": "Камера сама находит кольцо, следит за мячом и считает попадания.",
+  "lang": "ru",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "categories": ["sports", "health", "fitness"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

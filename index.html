@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0f1115">
+  <meta name="description" content="Тренажёр бросков: камера сама находит кольцо, следит за мячом и считает попадания.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Снайпер">
+  <title>Снайпер — тренировка бросков</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- ═════════════ Главный экран ═════════════ -->
+  <section id="screen-home" class="screen active" aria-label="Главная">
+    <header class="home-head">
+      <img src="icons/icon.svg" alt="" class="logo">
+      <div>
+        <h1>Снайпер</h1>
+        <p class="sub">Камера сама считает попадания</p>
+      </div>
+    </header>
+
+    <div class="stats-strip" id="home-stats"></div>
+
+    <h2 class="label">Режим тренировки</h2>
+    <div class="modes" id="modes" role="radiogroup">
+      <button class="mode" data-mode="free" role="radio">
+        <span class="mi">∞</span><b>Свободный</b><small>Без ограничений</small>
+      </button>
+      <button class="mode" data-mode="shots" role="radio">
+        <span class="mi">#</span><b>На количество</b><small>N бросков</small>
+      </button>
+      <button class="mode" data-mode="time" role="radio">
+        <span class="mi">⏱</span><b>На время</b><small>Таймер</small>
+      </button>
+      <button class="mode" data-mode="spots" role="radio">
+        <span class="mi">⌖</span><b>По точкам</b><small>Серии с позиций</small>
+      </button>
+    </div>
+    <div class="mode-opts" id="mode-opts"></div>
+
+    <button class="btn-start" id="btn-start">
+      <span>▶</span> Начать тренировку
+    </button>
+
+    <nav class="home-nav">
+      <button class="nav-btn" data-go="history"><span>📈</span>История</button>
+      <button class="nav-btn" data-go="settings"><span>⚙️</span>Настройки</button>
+      <button class="nav-btn" data-go="help"><span>💡</span>Как снимать</button>
+    </nav>
+  </section>
+
+  <!-- ═════════════ Тренировка ═════════════ -->
+  <section id="screen-train" class="screen" aria-label="Тренировка">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="view"></canvas>
+    <div id="flash" class="flash"></div>
+
+    <div class="hud">
+      <div class="hud-top">
+        <div id="status" class="pill">Запуск камеры…</div>
+        <div class="hud-right">
+          <div id="timer" class="pill mono">0:00</div>
+          <div id="progress" class="pill"></div>
+        </div>
+      </div>
+
+      <div class="score" id="score">
+        <div class="score-main"><span id="s-makes">0</span><span class="slash">/</span><span id="s-att">0</span></div>
+        <div class="score-pct" id="s-pct">—</div>
+        <div class="score-extra">
+          <span id="s-streak" class="streak"></span>
+        </div>
+        <div class="last-shots" id="last-shots"></div>
+      </div>
+
+      <div id="center-msg" class="center-msg hidden"></div>
+      <div id="last-result" class="last-result"></div>
+    </div>
+
+    <div class="controls" id="controls">
+      <div class="ctrl-group">
+        <button class="cbtn" id="z-out" aria-label="Отдалить">−</button>
+        <button class="cbtn wide mono" id="z-val" aria-label="Авто-зум на кольцо">1.0×</button>
+        <button class="cbtn" id="z-in" aria-label="Приблизить">+</button>
+      </div>
+      <div class="ctrl-group">
+        <button class="cbtn ok" id="m-make" aria-label="Засчитать попадание">✓</button>
+        <button class="cbtn bad" id="m-miss" aria-label="Засчитать промах">✗</button>
+        <button class="cbtn" id="m-undo" aria-label="Отменить последний бросок">↶</button>
+      </div>
+      <div class="ctrl-group">
+        <button class="cbtn" id="b-rim" aria-label="Указать кольцо вручную">◎</button>
+        <button class="cbtn" id="b-pause" aria-label="Пауза">❚❚</button>
+        <button class="cbtn stop" id="b-stop" aria-label="Завершить">■</button>
+      </div>
+    </div>
+
+    <div id="rim-panel" class="rim-panel hidden">
+      <p>Коснитесь кольца на экране. Размер рамки:</p>
+      <input type="range" id="rim-size" min="3" max="30" step="0.5" value="10">
+      <div class="row">
+        <button class="btn small" id="rim-auto">Авто-поиск</button>
+        <button class="btn small primary" id="rim-done">Готово</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════ Итоги ═════════════ -->
+  <section id="screen-summary" class="screen" aria-label="Итоги">
+    <div class="page">
+      <h1 class="page-title">Итоги тренировки</h1>
+      <div id="summary-body"></div>
+      <div class="btn-col">
+        <button class="btn primary big" id="sum-again">▶ Ещё тренировка</button>
+        <button class="btn" id="sum-share">Поделиться результатом</button>
+        <button class="btn" data-go="history">История</button>
+        <button class="btn ghost" data-go="home">На главную</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════ История ═════════════ -->
+  <section id="screen-history" class="screen" aria-label="История">
+    <div class="page">
+      <div class="page-head">
+        <button class="back" data-go="home" aria-label="Назад">‹</button>
+        <h1 class="page-title">История</h1>
+      </div>
+      <div id="history-body"></div>
+      <div class="btn-row">
+        <button class="btn small" id="h-export">Экспорт JSON</button>
+        <button class="btn small" id="h-csv">Экспорт CSV</button>
+        <label class="btn small">Импорт<input type="file" id="h-import" accept="application/json,.json" hidden></label>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════ Настройки ═════════════ -->
+  <section id="screen-settings" class="screen" aria-label="Настройки">
+    <div class="page">
+      <div class="page-head">
+        <button class="back" data-go="home" aria-label="Назад">‹</button>
+        <h1 class="page-title">Настройки</h1>
+      </div>
+      <form id="settings-form" class="settings" onsubmit="return false">
+        <fieldset>
+          <legend>Звук</legend>
+          <label>Набор звуков
+            <select name="soundPack" id="sound-pack"></select>
+          </label>
+          <label>Громкость <output id="vol-out"></output>
+            <input type="range" name="volume" min="0" max="1" step="0.05">
+          </label>
+          <div class="row">
+            <button type="button" class="btn small" id="test-make">▶ Попадание</button>
+            <button type="button" class="btn small" id="test-miss">▶ Промах</button>
+          </div>
+          <label class="switch"><input type="checkbox" name="streakAlerts"> Фанфары за серии (3, 5, 10…)</label>
+          <label class="switch"><input type="checkbox" name="flash"> Вспышка экрана цветом результата</label>
+        </fieldset>
+        <fieldset>
+          <legend>Голос</legend>
+          <label>Озвучивать счёт
+            <select name="voiceMode">
+              <option value="off">Выключено</option>
+              <option value="every">После каждого броска</option>
+              <option value="every5">Каждые 5 бросков</option>
+              <option value="every10">Каждые 10 бросков</option>
+            </select>
+          </label>
+          <label class="switch"><input type="checkbox" name="voiceCommands"> Голосовые команды</label>
+          <p class="hint" id="cmd-hint">«пауза», «продолжить», «отмена», «попал», «мимо», «счёт», «закончить», «приблизить», «отдалить».</p>
+        </fieldset>
+        <fieldset>
+          <legend>Распознавание</legend>
+          <label>Чувствительность к мячу
+            <select name="sensitivity">
+              <option value="low">Низкая — яркий свет, мало помех</option>
+              <option value="medium">Средняя</option>
+              <option value="high">Высокая — тусклый свет, мяч далеко</option>
+            </select>
+          </label>
+          <label class="switch"><input type="checkbox" name="autoZoom"> Авто-приближение к найденному кольцу</label>
+          <label class="switch"><input type="checkbox" name="hwZoom"> Использовать зум камеры (если доступен)</label>
+          <label>Разрешение камеры
+            <select name="resolution">
+              <option value="1080">1080p — лучше для приближения</option>
+              <option value="720">720p — экономнее</option>
+            </select>
+          </label>
+          <label>Детализация анализа
+            <select name="procSize">
+              <option value="320">Быстро (320 px)</option>
+              <option value="400">Баланс (400 px)</option>
+              <option value="512">Точно (512 px)</option>
+            </select>
+          </label>
+          <label class="switch"><input type="checkbox" name="showDebug"> Показывать отладку (кандидаты, треки)</label>
+        </fieldset>
+        <fieldset>
+          <legend>Данные</legend>
+          <button type="button" class="btn small danger" id="clear-all">Удалить всю историю</button>
+        </fieldset>
+      </form>
+    </div>
+  </section>
+
+  <!-- ═════════════ Советы ═════════════ -->
+  <section id="screen-help" class="screen" aria-label="Как снимать">
+    <div class="page">
+      <div class="page-head">
+        <button class="back" data-go="home" aria-label="Назад">‹</button>
+        <h1 class="page-title">Как поставить камеру</h1>
+      </div>
+      <div class="help">
+        <div class="help-pic" aria-hidden="true">
+          <svg viewBox="0 0 320 170" width="100%">
+            <rect x="0" y="0" width="320" height="170" rx="14" fill="var(--card)"/>
+            <rect x="190" y="18" width="96" height="58" rx="3" fill="none" stroke="var(--muted)" stroke-width="3"/>
+            <ellipse cx="238" cy="78" rx="24" ry="6" fill="none" stroke="var(--accent)" stroke-width="4"/>
+            <path d="M216 80 L226 108 M238 84 L238 110 M260 80 L250 108" stroke="var(--muted)" stroke-width="2"/>
+            <path d="M70 140 Q150 -10 236 74" fill="none" stroke="var(--ok)" stroke-width="3" stroke-dasharray="6 6"/>
+            <circle cx="70" cy="140" r="9" fill="var(--accent)"/>
+            <rect x="24" y="96" width="22" height="38" rx="5" fill="none" stroke="var(--text)" stroke-width="3"/>
+            <path d="M35 134 L35 160 M25 160 L45 160" stroke="var(--text)" stroke-width="3"/>
+            <text x="18" y="88" fill="var(--text)" font-size="12">телефон</text>
+          </svg>
+        </div>
+        <ol>
+          <li><b>Сбоку под углом ~45°</b> к щиту, в 4–8 м от кольца. Так видно, прошёл мяч сквозь кольцо или перед ним.</li>
+          <li><b>Закрепите телефон</b> на штативе или поставьте на опору, чтобы кадр не дрожал. Лучше горизонтально.</li>
+          <li><b>Кольцо — в верхней половине кадра</b>, над ним должно быть видно 2–3 м свободного пространства для дуги мяча.</li>
+          <li><b>Приближение</b>: кнопки «+/−» или щипок двумя пальцами; двойной тап — авто-зум на кольцо. Кольцо должно занимать хотя бы 1/15 ширины кадра.</li>
+          <li><b>Кольцо ищется само</b> (оранжевый обод). Если обод не оранжевый или не находится — нажмите ◎ и коснитесь кольца.</li>
+          <li><b>Ошиблось?</b> ✓ / ✗ добавят бросок, ↶ отменит последний. Или скажите «отмена» при включённых голосовых командах.</li>
+          <li>Экран не гаснет во время тренировки. Звук на телефоне сделайте погромче — сигналы попадания и промаха разные.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <button class="modal-close" id="modal-close" aria-label="Закрыть">×</button>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
