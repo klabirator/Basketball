@@ -640,7 +640,8 @@ $('#sum-share').addEventListener('click', async () => {
   const st = sessionStats(s);
   const text = `🏀 Тренировка бросков: ${st.makes} из ${st.attempts} (${st.pct}%), лучшая серия — ${st.bestStreak}, время ${fmtDur(s.activeMs)}.`;
   try {
-    if (navigator.share) await navigator.share({ text });
+    if (window.AndroidApp) window.AndroidApp.shareText(text);
+    else if (navigator.share) await navigator.share({ text });
     else {
       await navigator.clipboard.writeText(text);
       toast('Скопировано в буфер обмена');
@@ -968,6 +969,10 @@ function showHistory() {
 }
 
 function download(name, text, type) {
+  if (window.AndroidApp) {
+    window.AndroidApp.saveFile(name, type.split(';')[0], text);
+    return;
+  }
   const blob = new Blob([text], { type });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1047,9 +1052,30 @@ $('#clear-all').addEventListener('click', () => {
 
 // ───────────────────────────── Запуск ─────────────────────────────
 renderHome();
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
+if ('serviceWorker' in navigator && location.protocol === 'https:' && !window.AndroidApp) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+
+// Кнопка «Назад» в Android-приложении: true — обработано здесь, false — выйти из приложения.
+window.__snaiperBack = () => {
+  if (!$('#modal').classList.contains('hidden')) {
+    closeModal();
+    return true;
+  }
+  if (rimTapMode) {
+    $('#b-rim').click();
+    return true;
+  }
+  if (T && !T.finished) {
+    $('#b-stop').click();
+    return true;
+  }
+  if (!$('#screen-home').classList.contains('active')) {
+    go('home');
+    return true;
+  }
+  return false;
+};
 
 // для автотестов и отладки
 window.__snaiper = { detector, settings, get T() { return T; }, Z, V };

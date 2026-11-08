@@ -4,8 +4,9 @@ export class Voice {
   constructor() {
     this.enabled = true;
     this.voice = null;
-    this.supported = 'speechSynthesis' in window;
-    if (this.supported) {
+    this.native = window.AndroidApp || null; // Android-приложение: озвучка через системный TextToSpeech
+    this.supported = !!this.native || 'speechSynthesis' in window;
+    if (!this.native && this.supported) {
       const pick = () => {
         const vs = speechSynthesis.getVoices();
         this.voice = vs.find((v) => v.lang === 'ru-RU' && v.localService) || vs.find((v) => v.lang?.startsWith('ru')) || null;
@@ -18,6 +19,7 @@ export class Voice {
   say(text, { interrupt = false, delay = 0 } = {}) {
     if (!this.enabled || !this.supported || !text) return;
     const go = () => {
+      if (this.native) return this.native.speak(text, !!interrupt);
       if (interrupt) speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'ru-RU';
@@ -31,7 +33,8 @@ export class Voice {
   }
 
   cancel() {
-    if (this.supported) speechSynthesis.cancel();
+    if (this.native) this.native.stopSpeaking();
+    else if (this.supported) speechSynthesis.cancel();
   }
 }
 

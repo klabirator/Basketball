@@ -1,0 +1,56 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Веб-приложение из корня репозитория копируется в assets APK при каждой сборке.
+def webRoot = rootProject.file('..')
+def webOut = layout.buildDirectory.dir('generated/web')
+def copyWeb = tasks.register('copyWeb', Sync) {
+    from(webRoot) {
+        include 'index.html', 'manifest.webmanifest', 'css/**', 'js/**', 'icons/**'
+    }
+    into webOut.map { it.dir('web') }
+}
+
+android {
+    namespace 'com.snaiper.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.snaiper.app'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+
+    sourceSets {
+        main.assets.srcDirs += webOut
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Подпись отладочным ключом, чтобы APK можно было сразу установить.
+            // Для публикации в Google Play подставьте свой keystore.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+tasks.named('preBuild') { dependsOn copyWeb }
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.core:core:1.13.1'
+}
