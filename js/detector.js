@@ -23,12 +23,22 @@ const RIM_CHECK_EVERY = 6; // кадров между проверками ко�
 const RIM_HITS_TO_LOCK = 3;
 const RIM_MISSES_TO_LOSE = 45; // ≈ 9 с при 30 fps
 
+function _similar(p, q) {
+  if (!p || !q) return false;
+  const m = Math.max(p.w, q.w);
+  const r = p.w / q.w;
+  return Math.abs(p.cx - q.cx) < 0.35 * m && Math.abs(p.cy - q.cy) < 0.35 * m && r > 0.7 && r < 1.43;
+}
+
 export class ShotDetector {
   constructor(opts = {}) {
     this.sens = SENSITIVITY[opts.sensitivity] || SENSITIVITY.medium;
     this.w = 0;
     this.h = 0;
     this.counting = true; // если false — кольцо и мяч отслеживаются, но броски не засчитываются
+    // Фиксировать кольцо только по оранжевому цвету. В приложении выключено: цвет лишь предлагает
+    // кандидата, а подтверждает его поиск по форме (сетка + щит) — см. offerRim() и rimfinder.js.
+    this.colorAutoLock = opts.colorAutoLock ?? true;
     this.reset();
   }
 
@@ -40,9 +50,16 @@ export class ShotDetector {
     this.rim = null;
     this.rimLocked = false;
     this.rimManual = false;
+    this.rimSource = null;
     this._rimCand = null;
     this._rimHits = 0;
     this._rimMiss = 0;
+    this._pending = [];
+    this._offer = null;
+    this._offerHits = 0;
+    this._offerMiss = 0;
+    this._moveCand = null;
+    this._moveHits = 0;
     this.frame = 0;
     this.tracks = [];
     this._nextId = 1;
@@ -67,11 +84,13 @@ export class ShotDetector {
   }
 
   /** Установить кольцо вручную или после пересчёта координат. rim = {cx, cy, w, h} в координатах кадра обработки. */
-  setRim(rim, { manual = false, locked = true } = {}) {
+  setRim(rim, { manual = false, locked = true, source = null } = {}) {
     if (!rim) return this.clearRim();
     this.rim = { ...rim };
     this.rimLocked = locked;
     this.rimManual = manual;
+    this.rimSource = manual ? 'manual' : source || this.rimSource || 'color';
+    this._offerMiss = 0;
     this._rimMiss = 0;
     this._rimCand = locked ? { ...rim } : null;
     this._rimHits = locked ? RIM_HITS_TO_LOCK : 0;
@@ -81,6 +100,9 @@ export class ShotDetector {
     this.rim = null;
     this.rimLocked = false;
     this.rimManual = false;
+    this.rimSource = null;
+    this._offer = null;
+    this._offerHits = 0;
     this._rimCand = null;
     this._rimHits = 0;
     this._rimMiss = 0;
@@ -131,7 +153,7 @@ export class ShotDetector {
    * @param {number} t время, мс
    */
   process(data, w, h, t) {
-    const events = [];
+    const events = this._pending.splice(0);
     if (w !== this.w || h !== this.h) this._alloc(w, h);
     const N = w * h;
     const dt = this.lastT == null ? 1 / 30 : Math.max(0.005, Math.min(0.25, (t - this.lastT) / 1000));
@@ -269,24 +291,25 @@ export class ShotDetector {
       }
     }
 
-    const similar = (p, q) => {
-      if (!p || !q) return false;
-      const m = Math.max(p.w, q.w);
-      const r = p.w / q.w;
-      return Math.abs(p.cx - q.cx) < 0.35 * m && Math.abs(p.cy - q.cy) < 0.35 * m && r > 0.7 && r < 1.43;
-    };
+    const similar = _similar;
 
     if (!this.rimLocked) {
       if (best && similar(best, this._rimCand)) this._rimHits++;
       else this._rimHits = best ? 1 : 0;
       this._rimCand = best;
-      if (this._rimHits >= RIM_HITS_TO_LOCK) {
+      if (this.colorAutoLock && this._rimHits >= RIM_HITS_TO_LOCK) {
         this.rim = { ...best };
         this.rimLocked = true;
+        this.rimSource = 'color';
         this._rimMiss = 0;
-        events.push({ type: 'rim-found', rim: { ...best } });
+        events.push({ type: 'rim-found', rim: { ...best }, source: 'color' });
       }
     } else {
+      if (this.rimSource !== 'color') {
+        // Кольцо найдено по форме: цвет только подправляет положение, но не «теряет» кольцо.
+        if (best && _similar(best, this.rim)) this._rimMiss = 0;
+        return;
+      }
       if (best && similar(best, this.rim)) {
         const k = 0.15;
         this.rim.cx += (best.cx - this.rim.cx) * k;
@@ -305,6 +328,49 @@ export class ShotDetector {
           events.push({ type: 'rim-lost' });
         }
       }
+    }
+  }
+
+  /**
+   * Результат поиска кольца по форме (из фонового потока), в координатах кадра обработки.
+   * cand = {cx, cy, w, h} или null, если кольцо на кадре не найдено.
+   */
+  offerRim(cand) {
+    if (this.rimManual) return;
+    if (!cand) {
+      this._offerHits = 0;
+      if (this.rimLocked && this.rimSource === 'shape' && ++this._offerMiss > 12) {
+        this.clearRim();
+        this._pending.push({ type: 'rim-lost' });
+      }
+      return;
+    }
+    if (!this.rimLocked) {
+      this._offerHits = _similar(cand, this._offer) ? this._offerHits + 1 : 1;
+      this._offer = { ...cand };
+      if (this._offerHits >= 2) {
+        this.setRim(cand, { source: 'shape' });
+        this._pending.push({ type: 'rim-found', rim: { ...cand }, source: 'shape' });
+      }
+      return;
+    }
+    if (_similar(cand, this.rim)) {
+      if (this.rimSource === 'shape') {
+        const k = 0.3;
+        for (const key of ['cx', 'cy', 'w', 'h']) this.rim[key] += (cand[key] - this.rim[key]) * k;
+      }
+      this._offerMiss = 0;
+      this._moveHits = 0;
+      return;
+    }
+    // Уверенно найдено кольцо в другом месте (камеру сдвинули) — переезжаем после 3 подтверждений.
+    this._moveHits = _similar(cand, this._moveCand) ? this._moveHits + 1 : 1;
+    this._moveCand = { ...cand };
+    if (this._moveHits >= 3) {
+      this._moveHits = 0;
+      this.setRim(cand, { source: 'shape' });
+      this.shot = null;
+      this._pending.push({ type: 'rim-found', rim: { ...cand }, source: 'shape', moved: true });
     }
   }
 

@@ -1,4 +1,5 @@
 import { ShotDetector } from './detector.js';
+import { RimLocator } from './rimfinder.js';
 import { Camera } from './camera.js';
 import { Sound, SOUND_PACKS } from './audio.js';
 import { Voice, Commands } from './voice.js';
@@ -30,7 +31,8 @@ sound.pack = settings.soundPack;
 sound.setVolume(settings.volume);
 const voice = new Voice();
 const commands = new Commands(onVoiceCommand);
-const detector = new ShotDetector({ sensitivity: settings.sensitivity });
+// Цвет лишь предлагает кольцо; фиксируется оно после проверки формы (сетка + щит) в фоновом потоке.
+const detector = new ShotDetector({ sensitivity: settings.sensitivity, colorAutoLock: false });
 const video = $('#video');
 const camera = new Camera(video);
 const view = $('#view');
@@ -53,6 +55,82 @@ const V = { vw: 0, vh: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, pw: 0, ph: 0, hw: 1 
 let rimBase = null; // кольцо в базовых координатах {x, y, w, h}
 let lastRes = null;
 let procAvg = 10;
+
+// ── Поиск кольца по форме: кадр ~800 px, усреднённый во времени, анализируется в фоновом потоке ──
+const hiCanvas = document.createElement('canvas');
+const hctx = hiCanvas.getContext('2d', { willReadFrequently: true });
+const HI = { w: 0, h: 0, acc: null, n: 0, busy: false, id: 0, lastSent: -1e9, sentAt: 0, searchStart: 0 };
+const mainLocator = new RimLocator(); // для касания «◎» и на случай, если фоновый поток недоступен
+let rimWorker = null;
+try {
+  rimWorker = new Worker(new URL('./rimworker.js', import.meta.url), { type: 'module' });
+  rimWorker.onmessage = (e) => onRimResult(e.data);
+  rimWorker.onerror = () => {
+    rimWorker = null;
+    HI.busy = false;
+  };
+} catch {
+  rimWorker = null;
+}
+
+function resetRimSearch() {
+  HI.id++;
+  HI.n = 0;
+  HI.busy = false;
+  HI.lastSent = -1e9;
+}
+
+function rimSearchStep() {
+  if (detector.rimManual || !V.pw) return;
+  if (frameNo % 3 === 0) {
+    const c = V.crop;
+    const k = Math.min(1, 800 / Math.max(c.w, c.h));
+    const w = Math.max(32, Math.round(c.w * k)), h = Math.max(32, Math.round(c.h * k));
+    if (w !== HI.w || h !== HI.h) {
+      HI.w = w;
+      HI.h = h;
+      hiCanvas.width = w;
+      hiCanvas.height = h;
+      HI.acc = new Float32Array(w * h);
+      HI.n = 0;
+    }
+    hctx.drawImage(video, c.x, c.y, c.w, c.h, 0, 0, w, h);
+    const d = hctx.getImageData(0, 0, w, h).data, acc = HI.acc;
+    const a = HI.n === 0 ? 1 : 0.25; // усреднение убирает движущихся людей и мяч
+    for (let i = 0, j = 0; i < acc.length; i++, j += 4) {
+      const g = (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) >> 8;
+      acc[i] += (g - acc[i]) * a;
+    }
+    HI.n++;
+  }
+  const interval = detector.rimLocked ? 90 : 18;
+  if (HI.busy && rimWorker && performance.now() - HI.sentAt > 4000) {
+    rimWorker.terminate(); // фоновый поток не отвечает (старый WebView) — ищем в основном потоке
+    rimWorker = null;
+    HI.busy = false;
+  }
+  if (HI.busy || HI.n < 3 || frameNo - HI.lastSent < interval) return;
+  HI.lastSent = frameNo;
+  const gray = Uint8Array.from(HI.acc);
+  const s = HI.w / V.pw;
+  const cc = detector._rimCand;
+  const colorCand = cc ? { cx: cc.cx * s, cy: cc.cy * s, w: cc.w * s, h: cc.h * s } : null;
+  const msg = { id: HI.id, gray, w: HI.w, h: HI.h, colorCand };
+  if (rimWorker) {
+    HI.busy = true;
+    HI.sentAt = performance.now();
+    rimWorker.postMessage(msg, [gray.buffer]);
+  } else {
+    onRimResult({ id: msg.id, rim: mainLocator.locate(gray, msg.w, msg.h, colorCand) });
+  }
+}
+
+function onRimResult({ id, rim }) {
+  HI.busy = false;
+  if (id !== HI.id || !running || detector.rimManual) return; // кадр с тех пор изменился (зум, поворот)
+  const s = V.pw / HI.w;
+  detector.offerRim(rim ? { cx: rim.cx * s, cy: rim.cy * s, w: rim.w * s, h: Math.max(2, rim.h * s) } : null);
+}
 
 // ───────────────────────────── Навигация ─────────────────────────────
 function go(name) {
@@ -272,6 +350,8 @@ async function startTraining(videoFile = null) {
   }
 
   detector.reset();
+  resetRimSearch();
+  HI.searchStart = performance.now();
   detector.setSensitivity(settings.sensitivity);
   detector.counting = false;
   rimBase = null;
@@ -360,6 +440,7 @@ function onFrame(_ts, meta) {
     procAvg = procAvg * 0.9 + (performance.now() - t0) * 0.1;
     if (detector.rimLocked && detector.rim) rimBase = procToBase(detector.rim);
     for (const e of lastRes.events) handleEvent(e, now);
+    rimSearchStep();
   }
   draw();
 }
@@ -386,6 +467,7 @@ function applyView() {
   proc.width = V.pw;
   proc.height = V.ph;
   detector.resetBackground();
+  resetRimSearch();
   if (rimBase) {
     const r = baseToProc(rimBase);
     if (r.cx > 0 && r.cx < V.pw && r.cy > 0 && r.cy < V.ph) {
@@ -621,6 +703,11 @@ setInterval(() => {
     if (left <= 0) finishTraining();
   }
 
+  if (!T.started && running && now - HI.searchStart > 9000 && !T._hintShown) {
+    T._hintShown = true;
+    showCenter('Не вижу кольцо<small>Приблизьте камеру (+ или щипок), чтобы кольцо с сеткой было крупнее, — или нажмите ◎ и коснитесь кольца.</small>');
+    voice.say('Не вижу кольцо. Приблизьте камеру или укажите кольцо касанием');
+  }
   if (T.started && !T.paused && !detector.rimLocked) setStatus('Кольцо потеряно — ищу…', 'warn');
   else if (T.paused === 'user') setStatus('Пауза', 'warn');
   else if (T.paused === 'transition') setStatus('Переход', 'warn');
@@ -867,7 +954,13 @@ $('#rim-size').addEventListener('input', () => {
 });
 
 function setManualRim(px, py) {
-  const near = detector.rimNear(px, py);
+  let near = null;
+  if (HI.acc && HI.n) {
+    const k = HI.w / V.pw;
+    const r = mainLocator.near(Uint8Array.from(HI.acc), HI.w, HI.h, px * k, py * k);
+    if (r) near = { cx: r.cx / k, cy: r.cy / k, w: r.w / k, h: Math.max(2, r.h / k) };
+  }
+  near ||= detector.rimNear(px, py);
   const w = near ? near.w : (Number($('#rim-size').value) / 100) * V.pw;
   const r = near || { cx: px, cy: py, w, h: w * 0.25 };
   const wasStarted = T?.started;

@@ -17,8 +17,8 @@ const SHOTS = ['make', 'miss-left', 'make', 'rim-out', 'make', 'miss-right'];
 const EXPECT = SHOTS.map((s) => (s === 'make' ? 1 : 0));
 const W = 480, H = 270, FPS = 30, LEAD = 9, GAP = 2.6;
 
-async function writeY4M(path, shots = SHOTS, lead = LEAD) {
-  const scene = makeScene(W, H);
+async function writeY4M(path, shots = SHOTS, lead = LEAD, sceneOpts = {}) {
+  const scene = makeScene(W, H, sceneOpts);
   const out = createWriteStream(path);
   out.write(`YUV4MPEG2 W${W} H${H} F${FPS}:1 Ip A1:1 C420jpeg\n`);
   const Y = Buffer.alloc(W * H), U = Buffer.alloc((W / 2) * (H / 2)), V = Buffer.alloc((W / 2) * (H / 2));
@@ -62,7 +62,8 @@ const dir = await mkdtemp(join(process.env.E2E_TMP || tmpdir(), 'snaiper-'));
 const video = join(dir, 'scene.y4m');
 let browser, srv;
 try {
-  await writeY4M(video);
+  // камера: тёмное кольцо и оранжевая деревянная панель (как в реальном зале)
+  await writeY4M(video, SHOTS, LEAD, { rimColor: [45, 30, 28], panel: true });
   srv = await serve();
   browser = await chromium.launch({
     args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${video}`, '--autoplay-policy=no-user-gesture-required'],

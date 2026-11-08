@@ -6,7 +6,7 @@ export function makeScene(W, H, opts = {}) {
   const rim = { cx: Math.round(W * 0.62), cy: Math.round(H * 0.38), w: rimW, h: Math.max(3, Math.round(rimW * 0.22)) };
   const ballR = rimW * 0.26;
   const g = H * 2.2; // px/s²
-  return { W, H, rim, ballR, g, seed: opts.seed ?? 1 };
+  return { W, H, rim, ballR, g, seed: opts.seed ?? 1, rimColor: opts.rimColor ?? [225, 70, 25], panel: !!opts.panel };
 }
 
 function rng(seed) {
@@ -98,10 +98,23 @@ export function renderFrame(scene, ball, person, frameNo, out) {
     for (let y = Math.max(0, Math.floor(y0)); y < Math.min(H, Math.ceil(y1)); y++)
       for (let x = Math.max(0, Math.floor(x0)); x < Math.min(W, Math.ceil(x1)); x++) put(x, y, r, g, b);
   };
-  // щит
-  const bbw = rim.w * 2.1, bbh = rim.w * 1.25;
-  rect(rim.cx - bbw / 2, rim.cy - bbh * 0.95, rim.cx + bbw / 2, rim.cy + bbh * 0.05, 235, 235, 235);
-  rect(rim.cx - rim.w * 0.4, rim.cy - rim.w * 0.6, rim.cx + rim.w * 0.4, rim.cy - rim.w * 0.56, 40, 40, 40);
+  // оранжево-коричневая деревянная панель на стене (как в реальном зале — «ловушка» для поиска по цвету)
+  if (scene.panel) {
+    for (let y = Math.round(H * 0.62); y < Math.round(H * 0.74); y++)
+      for (let x = 0; x < Math.round(W * 0.36); x++) {
+        const plank = x % 9 === 0 ? -35 : 0;
+        put(x, y, 185 + plank, 105 + plank, 45 + plank / 2);
+      }
+  }
+  // щит 183×105 см (4.0×2.3 ширины кольца), низ на 0.33 ширины ниже обода; рамка и внутренний квадрат
+  const bbw = rim.w * 4.0, bbh = rim.w * 2.3, bTop = rim.cy + rim.w * 0.33 - bbh;
+  const line = rim.w > 30 ? 2 : 1;
+  rect(rim.cx - bbw / 2, bTop, rim.cx + bbw / 2, rim.cy + rim.w * 0.33, 70, 70, 75);
+  rect(rim.cx - bbw / 2 + line * 2, bTop + line * 2, rim.cx + bbw / 2 - line * 2, rim.cy + rim.w * 0.33 - line * 2, 232, 232, 232);
+  const sq = rim.w * 0.65;
+  rect(rim.cx - sq, rim.cy - rim.w, rim.cx + sq, rim.cy - rim.w + line, 40, 40, 40);
+  rect(rim.cx - sq, rim.cy - rim.w, rim.cx - sq + line, rim.cy, 40, 40, 40);
+  rect(rim.cx + sq - line, rim.cy - rim.w, rim.cx + sq, rim.cy, 40, 40, 40);
   // человек (тёмный прямоугольник с «головой»)
   if (person) {
     rect(person.x - W * 0.03, H * 0.55, person.x + W * 0.03, H * 0.86, 40, 50, 80);
@@ -121,18 +134,33 @@ export function renderFrame(scene, ball, person, frameNo, out) {
         else put(ball.x + dx, ball.y + dy, 215, 105, 35);
       }
   }
-  // сетка (белые линии, рисуются поверх мяча)
-  const netH = rim.w * 0.85;
-  for (let k = 0; k <= 6; k++) {
-    const xt = rim.cx - rim.w / 2 + (rim.w * k) / 6;
-    const xb = rim.cx - rim.w * 0.3 + (rim.w * 0.6 * k) / 6;
-    for (let s = 0; s <= 1; s += 1 / netH) put(xt + (xb - xt) * s, rim.cy + netH * s, 240, 240, 240);
+  // сетка: ромбовидное плетение — узлы рядами, каждая нить идёт наискосок к соседним узлам ниже
+  const netH = rim.w * 0.85, K = 6, R = 7, th = Math.max(1, Math.round(rim.w / 40));
+  const X = (r, u) => {
+    const t = r / R, left = rim.cx - (rim.w / 2) * (1 - 0.4 * t), width = rim.w * (1 - 0.4 * t);
+    return left + (width * u) / K;
+  };
+  const Y = (r) => rim.cy + (netH * r) / R;
+  const seg = (x0, y0, x1, y1) => {
+    const n = Math.max(2, Math.ceil(Math.hypot(x1 - x0, y1 - y0)));
+    for (let s2 = 0; s2 <= n; s2++)
+      for (let o = 0; o < th; o++) put(x0 + ((x1 - x0) * s2) / n + o, y0 + ((y1 - y0) * s2) / n, 240, 240, 240);
+  };
+  for (let r = 0; r < R; r++) {
+    for (let k = 0; k <= K; k++) {
+      const u = k + (r % 2) * 0.5;
+      if (u > K) continue;
+      for (const du of [-0.5, 0.5]) {
+        const v = u + du;
+        if (v >= 0 && v <= K) seg(X(r, u), Y(r), X(r + 1, v), Y(r + 1));
+      }
+    }
   }
   // кольцо — эллипс-обод
   const rx = rim.w / 2, ry = rim.h / 2;
   for (let a = 0; a < Math.PI * 2; a += 0.01) {
     for (let th = -1; th <= 1; th++) {
-      put(rim.cx + Math.cos(a) * (rx + th * 0.5), rim.cy + Math.sin(a) * (ry + th * 0.5), 225, 70, 25);
+      put(rim.cx + Math.cos(a) * (rx + th * 0.5), rim.cy + Math.sin(a) * (ry + th * 0.5), ...scene.rimColor);
     }
   }
   return data;

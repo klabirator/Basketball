@@ -1,8 +1,8 @@
 // Офлайн-кэш оболочки приложения. При изменении файлов увеличьте VERSION.
-const VERSION = 'snaiper-v1';
+const VERSION = 'snaiper-v2';
 const ASSETS = [
   './', 'index.html', 'css/style.css', 'manifest.webmanifest',
-  'js/app.js', 'js/detector.js', 'js/camera.js', 'js/audio.js', 'js/voice.js', 'js/storage.js', 'js/history.js',
+  'js/app.js', 'js/detector.js', 'js/rimfinder.js', 'js/rimworker.js', 'js/camera.js', 'js/audio.js', 'js/voice.js', 'js/storage.js', 'js/history.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
