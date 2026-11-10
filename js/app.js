@@ -1,5 +1,5 @@
 import { ShotDetector } from './detector.js';
-import { RimLocator } from './rimfinder.js';
+import { RimLocator, isRimColor } from './rimfinder.js';
 import { Camera } from './camera.js';
 import { Sound, SOUND_PACKS } from './audio.js';
 import { Voice, Commands } from './voice.js';
@@ -48,6 +48,7 @@ let lastSummaryId = null;
 let lastVideoFile = null; // для «Ещё раз» после проверки на видео
 let videoUrl = null;
 let lastVideoT = -1;
+let pendingRim = null; // кольцо, найденное предварительным просмотром ролика (доли кадра)
 const SPEEDS = [0.5, 1, 2];
 
 const Z = { total: 1, fx: 0.5, fy: 0.5 }; // фокус — в «базовых» нормированных координатах (при аппаратном зуме 1)
@@ -59,7 +60,7 @@ let procAvg = 10;
 // ── Поиск кольца по форме: кадр ~800 px, усреднённый во времени, анализируется в фоновом потоке ──
 const hiCanvas = document.createElement('canvas');
 const hctx = hiCanvas.getContext('2d', { willReadFrequently: true });
-const HI = { w: 0, h: 0, acc: null, n: 0, busy: false, id: 0, lastSent: -1e9, sentAt: 0, searchStart: 0 };
+const HI = { w: 0, h: 0, acc: null, wacc: null, n: 0, busy: false, id: 0, lastSent: -1e9, sentAt: 0, searchStart: 0 };
 const mainLocator = new RimLocator(); // для касания «◎» и на случай, если фоновый поток недоступен
 let rimWorker = null;
 try {
@@ -92,14 +93,16 @@ function rimSearchStep() {
       hiCanvas.width = w;
       hiCanvas.height = h;
       HI.acc = new Float32Array(w * h);
+      HI.wacc = new Float32Array(w * h);
       HI.n = 0;
     }
     hctx.drawImage(video, c.x, c.y, c.w, c.h, 0, 0, w, h);
-    const d = hctx.getImageData(0, 0, w, h).data, acc = HI.acc;
+    const d = hctx.getImageData(0, 0, w, h).data, acc = HI.acc, wacc = HI.wacc;
     const a = HI.n === 0 ? 1 : 0.25; // усреднение убирает движущихся людей и мяч
     for (let i = 0, j = 0; i < acc.length; i++, j += 4) {
       const g = (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) >> 8;
       acc[i] += (g - acc[i]) * a;
+      wacc[i] += ((isRimColor(d[j], d[j + 1], d[j + 2]) ? 1 : 0) - wacc[i]) * a;
     }
     HI.n++;
   }
@@ -112,24 +115,31 @@ function rimSearchStep() {
   if (HI.busy || HI.n < 3 || frameNo - HI.lastSent < interval) return;
   HI.lastSent = frameNo;
   const gray = Uint8Array.from(HI.acc);
+  const warm = warmMask();
   const s = HI.w / V.pw;
   const cc = detector._rimCand;
   const colorCand = cc ? { cx: cc.cx * s, cy: cc.cy * s, w: cc.w * s, h: cc.h * s } : null;
-  const msg = { id: HI.id, gray, w: HI.w, h: HI.h, colorCand };
+  const msg = { id: HI.id, gray, warm, w: HI.w, h: HI.h, colorCand };
   if (rimWorker) {
     HI.busy = true;
     HI.sentAt = performance.now();
-    rimWorker.postMessage(msg, [gray.buffer]);
+    rimWorker.postMessage(msg, [gray.buffer, warm.buffer]);
   } else {
-    onRimResult({ id: msg.id, rim: mainLocator.locate(gray, msg.w, msg.h, colorCand) });
+    onRimResult({ id: msg.id, rim: mainLocator.locate(gray, msg.w, msg.h, colorCand, warm) });
   }
+}
+
+function warmMask() {
+  const m = new Uint8Array(HI.wacc.length);
+  for (let i = 0; i < m.length; i++) m[i] = HI.wacc[i] > 0.5 ? 1 : 0;
+  return m;
 }
 
 function onRimResult({ id, rim }) {
   HI.busy = false;
   if (id !== HI.id || !running || detector.rimManual) return; // кадр с тех пор изменился (зум, поворот)
   const s = V.pw / HI.w;
-  detector.offerRim(rim ? { cx: rim.cx * s, cy: rim.cy * s, w: rim.w * s, h: Math.max(2, rim.h * s) } : null);
+  detector.offerRim(rim ? { cx: rim.cx * s, cy: rim.cy * s, w: rim.w * s, h: Math.max(2, rim.h * s), sure: !!rim.sure } : null);
 }
 
 // ───────────────────────────── Навигация ─────────────────────────────
@@ -360,6 +370,13 @@ async function startTraining(videoFile = null) {
   Z.fy = 0.5;
   V.vw = 0;
   lastVideoT = -1;
+  pendingRim = null;
+  if (videoFile) {
+    pendingRim = await prescanRim().catch(() => null);
+    if (!T || T.finished) return;
+    await video.play().catch(() => {});
+    $('#v-play').textContent = '❚❚';
+  }
   if (camera.hwCaps) await camera.setHwZoom(camera.hwCaps.min <= 1 ? 1 : camera.hwCaps.min);
   setStatus('Ищу кольцо…', 'warn');
   showCenter('Ищу кольцо…<small>Кольцо должно быть в кадре целиком. Если не находится — нажмите ◎ и коснитесь его.</small>');
@@ -387,8 +404,52 @@ async function openVideo(file) {
   });
   video.playbackRate = settings.videoSpeed || 1;
   $('#v-speed').textContent = `${video.playbackRate}×`;
-  await video.play();
-  $('#v-play').textContent = '❚❚';
+}
+
+const seekTo = (t) =>
+  new Promise((res) => {
+    const done = () => {
+      video.removeEventListener('seeked', done);
+      res();
+    };
+    video.addEventListener('seeked', done);
+    setTimeout(done, 2500);
+    video.currentTime = t;
+  });
+
+/**
+ * Предварительный просмотр ролика: по десятку кадров из разных мест находим кольцо ещё до воспроизведения
+ * (люди и мяч в разных кадрах в разных местах — усреднение их убирает), чтобы считать броски с первой секунды.
+ */
+async function prescanRim() {
+  const dur = video.duration;
+  if (!isFinite(dur) || dur < 1 || !video.videoWidth) return null;
+  const k = Math.min(1, 800 / Math.max(video.videoWidth, video.videoHeight));
+  const w = Math.round(video.videoWidth * k), h = Math.round(video.videoHeight * k);
+  hiCanvas.width = w;
+  hiCanvas.height = h;
+  const n = Math.max(3, Math.min(12, Math.floor(dur / 0.4)));
+  const sum = new Float32Array(w * h), wsum = new Float32Array(w * h);
+  for (let i = 0; i < n; i++) {
+    await seekTo((dur * (i + 0.5)) / n);
+    hctx.drawImage(video, 0, 0, w, h);
+    const d = hctx.getImageData(0, 0, w, h).data;
+    for (let p = 0, j = 0; p < sum.length; p++, j += 4) {
+      sum[p] += (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) >> 8;
+      if (isRimColor(d[j], d[j + 1], d[j + 2])) wsum[p]++;
+    }
+    showCenter(`Ищу кольцо в ролике… ${Math.round(((i + 1) / n) * 100)}%`);
+  }
+  const gray = new Uint8Array(w * h), warm = new Uint8Array(w * h);
+  for (let p = 0; p < gray.length; p++) {
+    gray[p] = sum[p] / n;
+    warm[p] = wsum[p] > n / 2 ? 1 : 0;
+  }
+  HI.w = 0; // размеры холста изменены — буфер живого поиска пересоздастся
+  // Фиксируем только при уверенном результате; иначе кольцо найдётся по ходу воспроизведения.
+  const rim = mainLocator.locate(gray, w, h, null, warm);
+  await seekTo(0);
+  return rim ? { x: rim.cx / w, y: rim.cy / h, w: rim.w / w, h: Math.max(2, rim.h) / h, sure: !!rim.sure } : null;
 }
 
 function closeVideo() {
@@ -426,6 +487,12 @@ function onFrame(_ts, meta) {
     V.vw = vw;
     V.vh = vh;
     applyView();
+    if (pendingRim && !detector.rimLocked) {
+      rimBase = pendingRim;
+      pendingRim = null;
+      detector.setRim(baseToProc(rimBase), { source: 'shape', sure: !!rimBase.sure });
+      handleEvent({ type: 'rim-found' }, performance.now());
+    }
   }
   const now = performance.now();
   frameNo++;
@@ -471,7 +538,10 @@ function applyView() {
   if (rimBase) {
     const r = baseToProc(rimBase);
     if (r.cx > 0 && r.cx < V.pw && r.cy > 0 && r.cy < V.ph) {
+      const keep = { sure: detector.rimSure, cal: detector.rimCalibrated };
       detector.setRim(r, { manual: detector.rimManual, locked: true });
+      detector.rimSure = keep.sure; // смена зума не меняет того, что мы знаем о ширине кольца
+      detector.rimCalibrated = keep.cal;
     } else if (!detector.rimManual) {
       detector.clearRim();
       rimBase = null;
@@ -521,7 +591,10 @@ function autoZoom(force = false) {
     return;
   }
   // Кольцо ≈ 10% ширины кадра, расположено чуть ниже центра — сверху остаётся место для дуги.
-  const target = Math.min(maxZoom(), Math.max(1, 0.1 / rimBase.w));
+  // Пока ширина кольца не подтверждена (щитом, мячом или вручную), она могла быть занижена поиском —
+  // приближаем осторожнее, чтобы дуга мяча не вылетала из кадра.
+  const wEff = detector.rimSure || detector.rimCalibrated ? rimBase.w : rimBase.w * 1.6;
+  const target = Math.min(maxZoom(), Math.max(1, 0.1 / wEff));
   if (!force && target < Z.total * 1.15) return;
   setZoom(target, { x: rimBase.x, y: rimBase.y - 0.1 / target });
   if (!force) toast(`Приближение ${target.toFixed(1)}× к кольцу`);
@@ -543,6 +616,11 @@ function handleEvent(e, now) {
       voice.say('Кольцо найдено', { interrupt: true });
     }
     if (settings.autoZoom) setTimeout(() => autoZoom(false), 50);
+  } else if (e.type === 'camera-moving') {
+    sound.play('warn');
+    setStatus('Камера движется — закрепите телефон', 'bad');
+    voice.say('Камера движется. Закрепите телефон', { interrupt: true });
+    T.cameraMoved = (T.cameraMoved || 0) + 1;
   } else if (e.type === 'rim-lost') {
     sound.play('warn');
     setStatus('Кольцо потеряно — ищу…', 'warn');
@@ -805,6 +883,7 @@ function videoReport(session, t) {
       <div class="big-sub"><b style="color:var(--ok)">${st.makes}</b> из <b>${st.attempts}</b></div>
     </div>
     <div class="card"><div class="opt-title">Что распознано (время в ролике)</div>${rows}</div>
+    ${t.cameraMoved ? `<div class="card" style="color:var(--accent2)">⚠️ В ролике камера двигалась (${t.cameraMoved} раз). Приложение рассчитано на неподвижный телефон на штативе: пока кадр движется, броски не считаются, а результат может быть неточным.</div>` : ''}
     <p class="hint">Проверка на видео не сохраняется в историю тренировок.</p>`;
 }
 
@@ -957,7 +1036,7 @@ function setManualRim(px, py) {
   let near = null;
   if (HI.acc && HI.n) {
     const k = HI.w / V.pw;
-    const r = mainLocator.near(Uint8Array.from(HI.acc), HI.w, HI.h, px * k, py * k);
+    const r = mainLocator.near(Uint8Array.from(HI.acc), HI.w, HI.h, px * k, py * k, warmMask());
     if (r) near = { cx: r.cx / k, cy: r.cy / k, w: r.w / k, h: Math.max(2, r.h / k) };
   }
   near ||= detector.rimNear(px, py);
@@ -1326,4 +1405,16 @@ window.__snaiperBack = () => {
 };
 
 // для автотестов и отладки
-window.__snaiper = { detector, settings, get T() { return T; }, Z, V };
+window.__snaiper = {
+  detector, settings, get T() { return T; }, Z, V,
+  // для проверок на видео: задать кольцо в координатах исходного видео (как касание ◎ с точным размером)
+  setRimVideo(x, y, w) {
+    const k = V.pw / V.crop.w;
+    const r = { cx: (x - V.crop.x) * k, cy: (y - V.crop.y) * k, w: w * k, h: w * k * 0.25 };
+    const was = T?.started;
+    detector.setRim(r, { manual: true });
+    rimBase = procToBase(r);
+    if (T && !was) handleEvent({ type: 'rim-found' }, performance.now());
+    if (settings.autoZoom) autoZoom(false);
+  },
+};

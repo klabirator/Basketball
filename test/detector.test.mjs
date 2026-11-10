@@ -182,3 +182,56 @@ test('четверо, игрок прыгает на подбор под кол�
   assert.ok(r.correct / r.total >= 0.8, `верно ${r.correct}/${r.total}: ${JSON.stringify(r.details)}`);
   assert.ok(r.extra <= 2, `лишних ${r.extra}: ${JSON.stringify(r.details)}`);
 });
+
+// ── Уроки реальных видео ──
+test('ширина кольца, заниженная поиском, уточняется по размеру мяча', () => {
+  const scene = makeScene(400, 225);
+  const det = new ShotDetector({ colorAutoLock: false });
+  // как на реальном уличном видео: положение верное, ширина занижена в 1.7 раза и не подтверждена щитом
+  det.setRim({ cx: scene.rim.cx, cy: scene.rim.cy, w: scene.rim.w / 1.7, h: scene.rim.h }, { source: 'shape', sure: false });
+  const out = [];
+  let resized = null;
+  for (const { data, t } of scenario(scene, ['miss-left', 'make', 'rim-out', 'make'])) {
+    for (const e of det.process(data, 400, 225, t).events) {
+      if (e.type === 'rim-resized') resized = e.w;
+      if (e.type === 'make' || e.type === 'miss') out.push(e.type);
+    }
+  }
+  assert.ok(resized && Math.abs(resized / scene.rim.w - 1) < 0.15, `ширина ${resized} вместо ${scene.rim.w}`);
+  assert.deepEqual(out.slice(1), ['make', 'miss', 'make']); // первый бросок идёт на калибровку
+});
+
+test('ширина, подтверждённая щитом или заданная вручную, по мячу не меняется', () => {
+  const scene = makeScene(400, 225);
+  const det = new ShotDetector({ colorAutoLock: false });
+  det.setRim(scene.rim, { manual: true });
+  for (const { data, t } of scenario(scene, ['make', 'make'])) {
+    assert.ok(!det.process(data, 400, 225, t).events.some((e) => e.type === 'rim-resized'));
+  }
+  assert.equal(det.rim.w, scene.rim.w);
+});
+
+test('движущаяся камера: броски не считаются, выдаётся предупреждение', () => {
+  const scene = makeScene(400, 225);
+  const det = new ShotDetector({ colorAutoLock: false });
+  det.setRim(scene.rim, { source: 'shape' });
+  const frame = new Uint8ClampedArray(400 * 225 * 4);
+  let warned = false, shots = 0, f = 0;
+  for (const { data, t } of scenario(scene, ['make', 'make', 'make'])) {
+    // панорама: кадр каждые ~0.5 с резко сдвигается по горизонтали
+    const shift = Math.floor(f++ / 15) * 37 % 200;
+    for (let y = 0; y < 225; y++) for (let x = 0; x < 400; x++) {
+      const s = (y * 400 + ((x + shift) % 400)) * 4, d = (y * 400 + x) * 4;
+      // текстура как в реальном зале (плитка, разметка): без неё сдвиг однотонной стены не виден
+      const tex = ((((x + shift) % 400) >> 3) + (y >> 3)) % 2 ? 22 : -22;
+      frame[d] = data[s] + tex; frame[d + 1] = data[s + 1] + tex; frame[d + 2] = data[s + 2] + tex; frame[d + 3] = 255;
+    }
+    for (const e of det.process(frame, 400, 225, t).events) {
+      if (e.type === 'camera-moving') warned = true;
+      if (e.type === 'make' || e.type === 'miss') shots++;
+    }
+  }
+  assert.ok(warned, 'нет предупреждения о движении камеры');
+  assert.equal(shots, 0);
+  assert.ok(!det.rimLocked, 'кольцо должно быть сброшено');
+});

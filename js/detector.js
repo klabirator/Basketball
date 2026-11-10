@@ -60,6 +60,8 @@ export class ShotDetector {
     this._offerMiss = 0;
     this._moveCand = null;
     this._moveHits = 0;
+    this._resets = [];
+    this.unstableUntil = 0;
     this.frame = 0;
     this.tracks = [];
     this._nextId = 1;
@@ -83,9 +85,12 @@ export class ShotDetector {
   }
 
   /** Установить кольцо вручную или после пересчёта координат. rim = {cx, cy, w, h} в координатах кадра обработки. */
-  setRim(rim, { manual = false, locked = true, source = null } = {}) {
+  setRim(rim, { manual = false, locked = true, source = null, sure = null } = {}) {
     if (!rim) return this.clearRim();
-    this.rim = { ...rim };
+    // Ширина «уверенная», если задана вручную или подтверждена щитом; иначе её уточнит размер мяча.
+    this.rimSure = manual || (sure ?? rim.sure ?? source !== 'shape');
+    this.rimCalibrated = false;
+    this.rim = { cx: rim.cx, cy: rim.cy, w: rim.w, h: rim.h };
     this.rimLocked = locked;
     this.rimManual = manual;
     this.rimSource = manual ? 'manual' : source || this.rimSource || 'color';
@@ -111,6 +116,8 @@ export class ShotDetector {
   /** Сброс временной шкалы (перемотка видео): треки и бросок сбрасываются, кольцо остаётся. */
   resetTime() {
     this.lastT = null;
+    this._resets = [];
+    this.unstableUntil = 0;
     this.tracks = [];
     this.shot = null;
     this.suspendUntil = 0;
@@ -138,6 +145,10 @@ export class ShotDetector {
     this.maskB = new Uint8Array(N);
     this.labels = new Int32Array(N);
     this.stack = new Int32Array(N);
+    // сетка 4×4 для оценки, по всему ли кадру идёт движение (признак движущейся камеры)
+    this.cellOf = new Uint8Array(N);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) this.cellOf[y * w + x] = Math.min(3, (y * 4 / h) | 0) * 4 + Math.min(3, (x * 4 / w) | 0);
+    this.cellFg = new Int32Array(16);
     this.bgReady = false;
     this.tracks = [];
     this.shot = null;
@@ -178,6 +189,8 @@ export class ShotDetector {
     const a = this._bgFrames < 12 ? 0.25 : 0.035;
     this._bgFrames++;
     let fgCount = 0;
+    const { cellOf, cellFg } = this;
+    cellFg.fill(0);
 
     for (let i = 0, j = 0; i < N; i++, j += 4) {
       const r = data[j], g = data[j + 1], b = data[j + 2];
@@ -191,6 +204,7 @@ export class ShotDetector {
       bg[k] += dr * ab; bg[k + 1] += dg * ab; bg[k + 2] += db * ab;
       fg[i] = isFg;
       fgCount += isFg;
+      if (isFg) cellFg[cellOf[i]]++;
       prev[i] = gray[i];
       gray[i] = (r * 77 + g * 150 + b * 29) >> 8;
 
@@ -212,12 +226,28 @@ export class ShotDetector {
     }
 
     // Резкая смена всего кадра (экспозиция, тряска камеры) — переобучаем фон.
-    if (fgCount > N * 0.35) {
+    // Движение сразу почти во всех клетках кадра — это камера, а не люди и мячи (те занимают часть кадра).
+    let activeCells = 0;
+    for (let c = 0; c < 16; c++) if (cellFg[c] > (N / 16) * 0.08) activeCells++;
+    if (fgCount > N * 0.35 || (activeCells === 16 && fgCount > N * 0.2)) {
       this.bgReady = false;
       this.tracks = [];
       if (this.shot) this.shot = null;
       this.suspendUntil = Math.max(this.suspendUntil, t + 400);
       this.candidates = [];
+      // Кадр «поплыл» несколько раз подряд — камера движется (в руках, панорама). Считать нельзя:
+      // без неподвижного фона любое движение выглядит как мяч.
+      this._resets = (this._resets || []).filter((x) => t - x < 6000 && x <= t);
+      this._resets.push(t);
+      if (this._resets.length >= 3) {
+        if (!(this.unstableUntil > t)) events.push({ type: 'camera-moving' });
+        this.unstableUntil = t + 3000;
+        this.suspendUntil = Math.max(this.suspendUntil, t + 3000);
+        if (this.rimLocked && !this.rimManual) {
+          this.clearRim(); // кольцо в кадре уже в другом месте
+          events.push({ type: 'rim-lost' });
+        }
+      }
       return this._result(events);
     }
 
@@ -339,6 +369,7 @@ export class ShotDetector {
    */
   offerRim(cand) {
     if (this.rimManual) return;
+    if (this.unstableUntil > (this.lastT ?? 0)) return; // камера движется — положению кольца верить нельзя
     if (!cand) {
       this._offerHits = 0;
       if (this.rimLocked && this.rimSource === 'shape' && ++this._offerMiss > 12) {
@@ -359,7 +390,8 @@ export class ShotDetector {
     if (_similar(cand, this.rim)) {
       if (this.rimSource === 'shape') {
         const k = 0.3;
-        for (const key of ['cx', 'cy', 'w', 'h']) this.rim[key] += (cand[key] - this.rim[key]) * k;
+        // ширину, уточнённую по мячу, поиском по форме не перезаписываем
+        for (const key of this.rimCalibrated ? ['cx', 'cy'] : ['cx', 'cy', 'w', 'h']) this.rim[key] += (cand[key] - this.rim[key]) * k;
       }
       this._offerMiss = 0;
       this._moveHits = 0;
@@ -440,8 +472,10 @@ export class ShotDetector {
       }
       const eqD = 2 * Math.sqrt(c.area / Math.PI);
       if (D) {
-        if (eqD < 0.4 * D || eqD > 1.9 * D) continue;
-        if (Math.max(bw, bh) > 3.2 * D) continue;
+        // пока ширина кольца не подтверждена, допуск на размер мяча шире (ширина могла быть занижена)
+        const up = this.rimSure || this.rimCalibrated ? 1.9 : 3.0;
+        if (eqD < 0.4 * D || eqD > up * D) continue;
+        if (Math.max(bw, bh) > up * 1.7 * D) continue;
       } else if (eqD < 3 || eqD > maxFree) continue;
       const fill = c.area / (bw * bh);
       if (fill < 0.3) continue;
@@ -498,6 +532,7 @@ export class ShotDetector {
       }
       tr.travel += Math.hypot(c.x - L.x, c.y - L.y);
       tr.d = 0.8 * tr.d + 0.2 * c.d;
+      if (tr.ds.length < 40) tr.ds.push(c.d);
       tr.pts.push({ x: c.x, y: c.y, t });
       if (tr.pts.length > 90) tr.pts.shift();
       tr.lastSeen = t;
@@ -515,6 +550,7 @@ export class ShotDetector {
         vx: 0,
         vy: 0,
         d: c.d,
+        ds: [c.d],
         lastSeen: t,
         born: t,
         travel: 0,
@@ -646,6 +682,21 @@ export class ShotDetector {
       s.last = p;
       s.lastSeen = t;
       s.pts.push(p);
+      // Самокалибровка: диаметр мяча = 0.52 ширины кольца (24 см и 45.7 см). Размер летящего мяча
+      // измеряется надёжно, поэтому по нему уточняем ширину кольца, не подтверждённую щитом.
+      if (!this.rimSure && !this.rimCalibrated && tr.ds && tr.ds.length >= 10 && p.y < cy) {
+        const ds = tr.ds.slice().sort((a, b) => a - b);
+        const wBall = ds[ds.length >> 1] / BALL_TO_RIM, ratio = wBall / W;
+        if (ratio > 0.45 && ratio < 3) {
+          if (ratio > 1.2 || ratio < 0.83) {
+            this.rim.h *= ratio;
+            this.rim.w = wBall;
+            events.push({ type: 'rim-resized', w: wBall });
+          }
+          this.rimCalibrated = true;
+          return; // со следующего кадра считаем с уточнённой шириной
+        }
+      }
       if (Math.abs(p.x - cx) < 2.5 * W && p.y < cy + 0.6 * W) s.near = true;
 
       if (q.y < cy && p.y >= cy) {

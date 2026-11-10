@@ -25,8 +25,9 @@ export class RimFinder {
   }
 
   /** Построить карты краёв. Вызывается перед candidates()/scoreAt(). */
-  analyze(gray, w, h) {
+  analyze(gray, w, h, warm = null) {
     if (w !== this.w || h !== this.h) this._alloc(w, h);
+    this.warm = warm; // маска красно-оранжевых пикселей (цвет обода) или null
     const { iD, iH, iV, iE } = this;
     const W1 = w + 1;
     let sumG = 0, cnt = 0;
@@ -183,6 +184,51 @@ export class RimFinder {
     return { cx: c.cx, cy: row, w: c.w, h: Math.max(2, c.w * 0.2), total: c.total, board: c.board, dN: c.dN };
   }
 
+  /**
+   * Цветной обод: красно-оранжевая горизонтальная линия над сеткой — сильный признак кольца,
+   * а её длина — точная ширина (по сетке и перекошенному щиту ширина оценивается плохо:
+   * белые нити на белом щите не видны, щит сбоку — параллелограмм). Тёмные кольца не затрагивает.
+   */
+  _colorRim(c) {
+    const { warm, w, h } = this;
+    if (!warm || c.total <= 0) return c;
+    const wr = Math.max(c.w, 16), cxr = Math.round(c.cx);
+    const rows = [];
+    let bestL = 0;
+    for (let y = Math.round(c.cy - 0.5 * wr); y <= c.cy + 0.35 * wr; y++) {
+      if (y < 1 || y >= h - 1) continue;
+      const on = (x) => x >= 0 && x < w && (warm[(y - 1) * w + x] | warm[y * w + x] | warm[(y + 1) * w + x]);
+      let x0 = -1;
+      const reach = Math.max(wr * 1.5, w * 0.03); // ширина по сетке бывает занижена — ищем линию шире
+      for (let d = 0; d <= reach; d++) {
+        if (on(cxr + d)) { x0 = cxr + d; break; }
+        if (on(cxr - d)) { x0 = cxr - d; break; }
+      }
+      if (x0 < 0) continue;
+      let l = x0, r = x0;
+      for (let i = x0, g = 0; i > 0 && g <= 2 && x0 - i < wr * 4; ) { i--; if (on(i)) { l = i; g = 0; } else g++; }
+      for (let i = x0, g = 0; i < w - 1 && g <= 2 && i - x0 < wr * 4; ) { i++; if (on(i)) { r = i; g = 0; } else g++; }
+      const L = r - l + 1;
+      rows.push({ y, l, r, L });
+      if (L > bestL) bestL = L;
+    }
+    if (bestL < Math.max(10, 0.9 * c.w) || bestL > 6 * wr) return c;
+    const long = rows.filter((q) => q.L >= 0.75 * bestL);
+    if (long.length > 0.6 * bestL + 3) return c; // сплошное красное пятно, а не тонкий обод
+    const top = long.reduce((a, q) => (q.L > a.L ? q : a));
+    const cy = long.reduce((a, q) => a + q.y, 0) / long.length;
+    // Обод — тонкая линия/эллипс: вокруг него красного мало. Красное покрытие площадки, стена, щит с
+    // красной заливкой дают сплошную область — такие отбрасываем.
+    let cnt = 0, tot = 0;
+    const y0 = Math.max(0, Math.round(cy - bestL * 0.6)), y1 = Math.min(h - 1, Math.round(cy + bestL * 0.6));
+    for (let y = y0; y <= y1; y++) for (let x = top.l; x <= top.r; x++) { tot++; cnt += warm[y * w + x]; }
+    if (cnt / Math.max(1, tot) > 0.3) return c;
+    // Красная линия совпадает с сеткой — это сам обод, берём его размеры. Если она в стороне
+    // (красный квадрат на щите, кронштейн) — это лишь подтверждение, что рядом кольцо.
+    if (Math.abs((top.l + top.r) / 2 - c.cx) > 0.35 * bestL) return { ...c, total: c.total + 0.4, color: true };
+    return { ...c, cx: (top.l + top.r) / 2, cy, w: bestL, h: Math.max(2, long.length), total: c.total + 0.5, color: true };
+  }
+
   /** Все кандидаты (после подавления пересечений), по убыванию уверенности. */
   candidates(limit = 40, minW = Math.max(12, Math.min(this.w, this.h) * 0.03), maxW = Math.min(this.w, this.h) * 0.45) {
     const { w, h } = this;
@@ -234,6 +280,65 @@ export class RimFinder {
   }
 }
 
+/**
+ * Цвет обода: красный/оранжевый, включая бордовый и малиновый (в тени и после сжатия видео
+ * красный обод выглядит как тёмно-бордовый с уходом в пурпур). Оттенок −40°…37°.
+ */
+export function isRimColor(r, g, b) {
+  if (!(r > g && r >= b && r > 55)) return false;
+  const c = r - (g < b ? g : b);
+  if (c < r * 0.27 || c < 18) return false;
+  const hn = g - b;
+  return hn > -0.67 * c && hn < 0.62 * c;
+}
+
+/** Связные области маски цвета (8-связность). */
+function warmComponents(mask, w, h) {
+  const seen = new Uint8Array(w * h), stack = new Int32Array(w * h), out = [];
+  for (let i = 0; i < w * h; i++) {
+    if (!mask[i] || seen[i]) continue;
+    let sp = 0, area = 0, minX = w, maxX = 0, minY = h, maxY = 0;
+    stack[sp++] = i;
+    seen[i] = 1;
+    while (sp) {
+      const j = stack[--sp], y = (j / w) | 0, x = j - y * w;
+      area++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -2; dx <= 2; dx++) { // по горизонтали терпим разрыв в 1 px (тонкий обод)
+          const xx = x + dx;
+          if (xx < 0 || xx >= w) continue;
+          const k = yy * w + xx;
+          if (mask[k] && !seen[k]) {
+            seen[k] = 1;
+            stack[sp++] = k;
+          }
+        }
+      }
+    }
+    if (area >= 6) out.push({ area, minX, maxX, minY, maxY });
+    if (out.length >= 600) break;
+  }
+  return out;
+}
+
+function halfMask(src, w, h) {
+  const w2 = w >> 1, h2 = h >> 1, out = new Uint8Array(w2 * h2);
+  for (let y = 0; y < h2; y++) {
+    const r0 = 2 * y * w, r1 = r0 + w;
+    for (let x = 0; x < w2; x++) {
+      const i = 2 * x;
+      out[y * w2 + x] = src[r0 + i] | src[r0 + i + 1] | src[r1 + i] | src[r1 + i + 1]; // тонкая линия не должна пропасть
+    }
+  }
+  return out;
+}
+
 function half(src, w, h) {
   const w2 = w >> 1, h2 = h >> 1, out = new Uint8Array(w2 * h2);
   for (let y = 0; y < h2; y++) {
@@ -257,12 +362,13 @@ export class RimLocator {
     this.finders = [];
   }
 
-  _levels(gray, w, h) {
+  _levels(gray, w, h, warm = null) {
     const levels = [];
     let cur = { g: gray, w, h }, scale = 1;
     while (true) {
-      levels.push({ ...cur, scale });
+      levels.push({ ...cur, scale, warm });
       if (Math.min(cur.w, cur.h) / 2 < 70) break;
+      if (warm) warm = halfMask(warm, cur.w, cur.h);
       cur = half(cur.g, cur.w, cur.h);
       scale *= 2;
     }
@@ -270,11 +376,11 @@ export class RimLocator {
   }
 
   /** Все кандидаты всех уровней в координатах исходного изображения. */
-  candidates(gray, w, h) {
+  candidates(gray, w, h, warm = null) {
     const out = [];
-    this._levels(gray, w, h).forEach((L, i) => {
+    this._levels(gray, w, h, warm).forEach((L, i) => {
       const f = (this.finders[i] ||= new RimFinder());
-      f.analyze(L.g, L.w, L.h);
+      f.analyze(L.g, L.w, L.h, L.warm);
       const minW = i === 0 ? Math.max(12, Math.min(L.w, L.h) * 0.03) : LEVEL_MAX_W / 2.2;
       const maxW = Math.min(LEVEL_MAX_W, Math.min(L.w, L.h) * 0.45);
       for (const c of f.candidates(30, minW, maxW)) {
@@ -288,13 +394,93 @@ export class RimLocator {
       if (res.some((t) => Math.abs(t.cx - c.cx) < Math.max(t.w, c.w) * 0.6 && Math.abs(t.cy - c.cy) < Math.max(t.w, c.w) * 0.6)) continue;
       res.push(c);
     }
+    this._lineWidth(res);
+    if (warm) this._useColor(res, warm, w, h);
+    // Кольцо висит выше игроков, а камеру ставят так, чтобы оно было в верхней половине кадра.
+    // Всё, что в нижних 40% (пол, разметка, покрытие), — маловероятно кольцо.
+    for (const c of res) if (c.cy > h * 0.6) {
+      c.total *= 0.7;
+      if (c.bonus) c.bonus *= 0.7;
+    }
+    for (const c of res) c.sure = c.board >= 0.75; // щит дал масштаб — ширине можно верить
+    res.sort((a, b) => b.total - a.total);
     return res;
   }
 
+  /**
+   * Ширина по линии обода: когда щит не дал масштаб (перекошен перспективой, стеклянный), а сетка видна
+   * частично, длина горизонтальной линии обода в полутонах точнее, чем ширина «по сетке».
+   */
+  _lineWidth(res) {
+    const f = this.finders[0];
+    for (const c of res.slice(0, 8)) {
+      if (c.board >= 0.75 || c.total <= 0) continue;
+      const b = Math.max(2, Math.round(c.w * 0.12)), cap = Math.round(c.w * 2.6);
+      const gapMax = Math.max(2, Math.round(c.w * 0.1));
+      const on = (x) => f._box(f.iH, x, c.cy - b, x + 1, c.cy + b + 1) > 0;
+      let x0 = Math.round(c.cx), found = false;
+      for (let d = 0; d <= c.w * 0.5 && !found; d++) {
+        if (on(x0 + d)) { x0 += d; found = true; } else if (on(x0 - d)) { x0 -= d; found = true; }
+      }
+      if (!found) continue;
+      let l = x0, r = x0, openL = false, openR = false;
+      for (let i = x0, g = 0; g <= gapMax; ) { i--; if (i < 0 || x0 - i > cap) { openL = true; break; } if (on(i)) { l = i; g = 0; } else g++; }
+      for (let i = x0, g = 0; g <= gapMax; ) { i++; if (i >= f.w || i - x0 > cap) { openR = true; break; } if (on(i)) { r = i; g = 0; } else g++; }
+      const L = r - l + 1;
+      if (openL || openR || L < c.w * 1.15 || L > c.w * 4) continue; // линия уходит дальше — это не обод
+      c.cx = (l + r) / 2;
+      c.w = L;
+      c.h = Math.max(2, L * 0.2);
+      c.byLine = true;
+    }
+  }
+
+  /**
+   * Цвет как подтверждение: тонкая красно-оранжевая разметка рядом с кандидатом «по сетке» (обод,
+   * квадрат на щите, кронштейн). Сплошные красные поверхности (пол, панели, покрытие) не в счёт.
+   * Самостоятельным кандидатом цвет не служит: красные полосы разметки площадки выглядят так же.
+   */
+  _useColor(res, warm, w, h) {
+    const comps = warmComponents(warm, w, h);
+    // интегральное изображение маски — чтобы быстро считать, сколько красного вокруг
+    const W1 = w + 1, I = new Int32Array(W1 * (h + 1));
+    for (let y = 1; y <= h; y++) {
+      let row = 0;
+      for (let x = 1; x <= w; x++) {
+        row += warm[(y - 1) * w + x - 1];
+        I[y * W1 + x] = row + I[(y - 1) * W1 + x];
+      }
+    }
+    const sumBox = (x0, y0, x1, y1) => {
+      x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(w, x1); y1 = Math.min(h, y1);
+      return x1 > x0 && y1 > y0 ? I[y1 * W1 + x1] - I[y0 * W1 + x1] - I[y1 * W1 + x0] + I[y0 * W1 + x0] : 0;
+    };
+    const thin = comps.filter((c) => {
+      const bw = c.maxX - c.minX + 1, bh = c.maxY - c.minY + 1;
+      if (bw < 8 || bw > w * 0.3 || bh > h * 0.3) return false;
+      if (!(c.area / (bw * bh) < 0.45 || bh <= Math.max(3, 0.25 * bw))) return false;
+      // Разметка у кольца изолирована (вокруг щит, небо, стена). Полоски на краю оранжевого пола,
+      // панелей или покрытия примыкают к большой красной поверхности — такие не считаем.
+      const m = Math.max(6, Math.round(0.5 * Math.max(bw, bh)));
+      const inner = sumBox(c.minX, c.minY, c.maxX + 1, c.maxY + 1);
+      const outer = sumBox(c.minX - m, c.minY - m, c.maxX + 1 + m, c.maxY + 1 + m);
+      const ringArea = (bw + 2 * m) * (bh + 2 * m) - bw * bh;
+      return (outer - inner) / ringArea < 0.06;
+    });
+    for (const c of res) {
+      if (c.total <= 0) continue;
+      const wr = Math.max(c.w, 20);
+      if (thin.some((t) => t.maxX > c.cx - 1.5 * wr && t.minX < c.cx + 1.5 * wr && t.maxY > c.cy - wr && t.minY < c.cy + wr)) {
+        c.bonus = 0.4; // учитывается только на второй ступени решения (см. locate)
+        c.color = true;
+      }
+    }
+  }
+
   /** Кольцо рядом с точкой касания (x, y) — для ручного указания: уточняет положение и размер. */
-  near(gray, w, h, x, y) {
+  near(gray, w, h, x, y, warm = null) {
     let best = null, bd = Infinity;
-    for (const c of this.candidates(gray, w, h)) {
+    for (const c of this.candidates(gray, w, h, warm)) {
       if (c.total < 0.2) continue;
       const d = Math.hypot(c.cx - x, c.cy + c.w * 0.2 - y);
       if (d < Math.max(c.w * 1.2, Math.min(w, h) * 0.08) && d - c.total * c.w * 0.5 < bd) {
@@ -309,20 +495,25 @@ export class RimLocator {
    * colorCand — кандидат по оранжевому цвету (в тех же координатах) или null.
    * Возвращает {cx, cy, w, h, source, total} или null.
    */
-  locate(gray, w, h, colorCand = null) {
-    const top = this.candidates(gray, w, h);
-    const [a, b] = top;
-    if (a) {
-      const margin = a.total - (b ? b.total : 0);
-      if (a.total >= 1.0 && (margin >= 0.15 || a.total >= 1.35)) return { ...a, source: 'shape' };
+  locate(gray, w, h, colorCand = null, warm = null) {
+    const top = this.candidates(gray, w, h, warm);
+    // Ступень 1 — только форма (сетка + щит). Ступень 2 — если уверенного нет, учитываем цветовое
+    // подтверждение (красная разметка у кольца). Порознь: в зале с оранжевым полом цвет чаще мешает.
+    for (const useColor of [false, true]) {
+      if (useColor && !top.some((c) => c.bonus)) break;
+      const sc = (c) => c.total + (useColor ? c.bonus || 0 : 0);
+      const [a, b] = top.slice().sort((p, q) => sc(q) - sc(p));
+      if (!a) break;
+      const margin = sc(a) - (b ? sc(b) : 0);
+      if (sc(a) >= 1.0 && (margin >= 0.15 || sc(a) >= 1.35)) return { ...a, total: sc(a), source: useColor ? 'shape+color' : 'shape' };
     }
     if (colorCand) {
       // Оранжевый объект принимаем, только если под ним действительно сетка (а не пол/панели).
-      const levels = this._levels(gray, w, h);
+      const levels = this._levels(gray, w, h, warm);
       let i = 0;
       while (i < levels.length - 1 && colorCand.w / levels[i].scale > LEVEL_MAX_W) i++;
       const L = levels[i], f = this.finders[i];
-      f.analyze(L.g, L.w, L.h);
+      f.analyze(L.g, L.w, L.h, L.warm);
       const s = f.scoreAt(colorCand.cx / L.scale, colorCand.cy / L.scale, colorCand.w / L.scale);
       if (s.total >= 0.9) return { ...s, cx: s.cx * L.scale, cy: s.cy * L.scale, w: s.w * L.scale, h: s.h * L.scale, source: 'color+net' };
     }

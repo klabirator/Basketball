@@ -3,10 +3,10 @@ import { RimLocator } from './rimfinder.js';
 
 const locator = new RimLocator();
 self.onmessage = (e) => {
-  const { id, gray, w, h, colorCand } = e.data;
+  const { id, gray, warm, w, h, colorCand } = e.data;
   let rim = null;
   try {
-    rim = locator.locate(gray, w, h, colorCand);
+    rim = locator.locate(gray, w, h, colorCand, warm);
   } catch {
     rim = null;
   }
