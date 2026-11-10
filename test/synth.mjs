@@ -23,11 +23,11 @@ function rng(seed) {
  * Траектория броска. kind: 'make' | 'miss-left' | 'miss-right' | 'rim-out' | 'short'
  * Возвращает функцию pos(tSec) → {x, y} | null (мяч вне игры).
  */
-export function shotPath(scene, kind, fromLeft = true) {
+export function shotPath(scene, kind, fromLeft = true, opts = {}) {
   const { rim, g, H, W, ballR } = scene;
-  const x0 = fromLeft ? W * 0.12 : W * 0.95;
-  const y0 = H * 0.82;
-  const apexY = rim.cy - rim.w * 2.4;
+  const x0 = opts.x0 ?? (fromLeft ? W * 0.12 : W * 0.95);
+  const y0 = opts.y0 ?? H * 0.82;
+  const apexY = rim.cy - rim.w * (opts.apex ?? 2.4);
   let xc = rim.cx;
   if (kind === 'miss-left') xc = rim.cx - rim.w * 1.3;
   if (kind === 'miss-right') xc = rim.cx + rim.w * 1.3;
@@ -39,7 +39,7 @@ export function shotPath(scene, kind, fromLeft = true) {
   const tc = (-B + Math.sqrt(B * B - 4 * A * C)) / (2 * A);
   const vx = (xc - x0) / tc;
   const free = (t) => ({ x: x0 + vx * t, y: y0 + vy * t + 0.5 * g * t * t });
-  return (t) => {
+  const fn = (t) => {
     if (t < 0) return null;
     if (t <= tc || kind === 'miss-left' || kind === 'miss-right' || kind === 'short') {
       const p = free(t);
@@ -66,9 +66,15 @@ export function shotPath(scene, kind, fromLeft = true) {
     const p = { x: xc + bvx * dt, y: rim.cy + bvy * dt + 0.5 * g * dt * dt };
     return p.y > H + ballR * 2 ? null : p;
   };
+  fn.tc = tc; // время пересечения линии кольца (для эталонной разметки)
+  return fn;
 }
 
-/** Рендер кадра в RGBA. ball = {x,y} | null, person = {x} | null */
+/**
+ * Рендер кадра в RGBA.
+ * ball: {x, y, color?} | массив таких | null
+ * person: {x, headY?, w?} | массив таких | null (headY — высота головы, по умолчанию 0.5·H)
+ */
 export function renderFrame(scene, ball, person, frameNo, out) {
   const { W, H, rim, ballR } = scene;
   const data = out || new Uint8ClampedArray(W * H * 4);
@@ -115,23 +121,29 @@ export function renderFrame(scene, ball, person, frameNo, out) {
   rect(rim.cx - sq, rim.cy - rim.w, rim.cx + sq, rim.cy - rim.w + line, 40, 40, 40);
   rect(rim.cx - sq, rim.cy - rim.w, rim.cx - sq + line, rim.cy, 40, 40, 40);
   rect(rim.cx + sq - line, rim.cy - rim.w, rim.cx + sq, rim.cy, 40, 40, 40);
-  // человек (тёмный прямоугольник с «головой»)
-  if (person) {
-    rect(person.x - W * 0.03, H * 0.55, person.x + W * 0.03, H * 0.86, 40, 50, 80);
+  // люди (тёмный корпус с «головой»; поднятые руки — если armsUp)
+  for (const pr of [].concat(person || [])) {
+    const hy = pr.headY ?? H * 0.5, hw = (pr.w ?? 0.03) * W;
+    const col = pr.color || [40, 50, 80];
+    rect(pr.x - hw, hy + ballR * 0.9, pr.x + hw, Math.min(H * 0.86, hy + H * 0.36), ...col);
+    if (pr.armsUp) {
+      rect(pr.x - hw, hy - ballR * 2.5, pr.x - hw + ballR * 0.5, hy + ballR, ...col);
+      rect(pr.x + hw - ballR * 0.5, hy - ballR * 2.5, pr.x + hw, hy + ballR, ...col);
+    }
     for (let dy = -ballR; dy <= ballR; dy++)
       for (let dx = -ballR; dx <= ballR; dx++)
-        if (dx * dx + dy * dy <= ballR * ballR * 0.8) put(person.x + dx, H * 0.5 + dy, 170, 120, 95);
+        if (dx * dx + dy * dy <= ballR * ballR * 0.8) put(pr.x + dx, hy + dy, ...(pr.skin || [170, 120, 95]));
   }
-  // мяч
-  if (ball) {
-    const R = ballR;
+  // мячи
+  for (const b of [].concat(ball || [])) {
+    const R = ballR, col = b.color || [215, 105, 35];
     for (let dy = -Math.ceil(R); dy <= Math.ceil(R); dy++)
       for (let dx = -Math.ceil(R); dx <= Math.ceil(R); dx++) {
         const d2 = dx * dx + dy * dy;
         if (d2 > R * R) continue;
         const seam = Math.abs(dx) < 0.6 || Math.abs(dy) < 0.6;
-        if (seam) put(ball.x + dx, ball.y + dy, 40, 25, 15);
-        else put(ball.x + dx, ball.y + dy, 215, 105, 35);
+        if (seam) put(b.x + dx, b.y + dy, 40, 25, 15);
+        else put(b.x + dx, b.y + dy, col[0], col[1], col[2]);
       }
   }
   // сетка: ромбовидное плетение — узлы рядами, каждая нить идёт наискосок к соседним узлам ниже

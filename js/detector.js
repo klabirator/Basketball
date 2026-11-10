@@ -64,7 +64,6 @@ export class ShotDetector {
     this.tracks = [];
     this._nextId = 1;
     this.shot = null;
-    this.cooldownUntil = 0;
     this.suspendUntil = 0;
     this.lastT = null;
     this.netScore = 0;
@@ -114,7 +113,6 @@ export class ShotDetector {
     this.lastT = null;
     this.tracks = [];
     this.shot = null;
-    this.cooldownUntil = 0;
     this.suspendUntil = 0;
     this.bgReady = false;
   }
@@ -186,8 +184,11 @@ export class ShotDetector {
       const k = i * 3;
       const dr = r - bg[k], dg = g - bg[k + 1], db = b - bg[k + 2];
       const d = (dr < 0 ? -dr : dr) + (dg < 0 ? -dg : dg) + (db < 0 ? -db : db);
-      bg[k] += dr * a; bg[k + 1] += dg * a; bg[k + 2] += db * a;
       const isFg = d > thr ? 1 : 0;
+      // Там, где сейчас движущийся объект, фон учится в 7 раз медленнее: иначе мяч, зависший
+      // на верхней точке отскока, «впечатывается» в фон и оставляет неподвижный призрак.
+      const ab = isFg ? a * 0.15 : a;
+      bg[k] += dr * ab; bg[k + 1] += dg * ab; bg[k + 2] += db * ab;
       fg[i] = isFg;
       fgCount += isFg;
       prev[i] = gray[i];
@@ -246,6 +247,7 @@ export class ShotDetector {
       tracks: this.tracks,
       candidates: this.candidates,
       shot: this.shot,
+      shots: this.shots,
     };
   }
 
@@ -454,6 +456,7 @@ export class ShotDetector {
 
   _track(cands, t, g, D) {
     const tracks = this.tracks;
+    const R = this.rimLocked ? this.rim : null;
     for (const tr of tracks) {
       const L = tr.pts[tr.pts.length - 1];
       const dtt = (t - L.t) / 1000;
@@ -461,7 +464,10 @@ export class ShotDetector {
       tr.py = L.y + tr.vy * dtt + 0.5 * g * dtt * dtt;
       const sp = Math.hypot(tr.vx, tr.vy);
       const d = D || tr.d;
-      tr.gate = Math.max(2.5 * d, 1.5 * d + 0.6 * sp * dtt);
+      // Пока скорость неизвестна (новый трек) или мяч у кольца — окно шире; у «зрелого» трека в полёте —
+      // узкое вокруг прогноза, иначе при нескольких мячах в воздухе треки перескакивают с мяча на мяч.
+      const nearRim = R && Math.hypot(L.x - R.cx, L.y - R.cy) < R.w * 1.6; // у кольца мяч отскакивает и резко меняет направление
+      tr.gate = tr.pts.length < 3 || nearRim ? Math.max(2.5 * d, 1.5 * d + 0.6 * sp * dtt) : Math.max(1.2 * d, 0.8 * d + 0.35 * sp * dtt);
     }
     const pairs = [];
     for (let ti = 0; ti < tracks.length; ti++) {
@@ -523,52 +529,98 @@ export class ShotDetector {
 
   // ───────────────────────────── Логика броска ─────────────────────────────
 
+  // Несколько бросков могут идти одновременно (групповая тренировка): каждый привязан к своему мячу.
+  get shot() {
+    return this.shots.length ? this.shots[this.shots.length - 1] : null;
+  }
+
+  set shot(v) {
+    if (v === null) {
+      this.shots = [];
+      this._dead = [];
+    }
+  }
+
   _updateShot(t, events) {
     const R = this.rim;
-    const cx = R.cx, cy = R.cy, W = R.w, hw = W / 2, D = W * BALL_TO_RIM;
+    const cx = R.cx, cy = R.cy, W = R.w, D = W * BALL_TO_RIM;
+    this._dead = this._dead.filter((z) => z.until > t);
+    // Сначала ведём начатые броски — они могут узнать «свой» мяч, вернувшийся в кадр, раньше,
+    // чем он будет принят за новый бросок.
+    for (const s of this.shots.slice()) this._stepShot(s, t, events);
 
-    if (!this.shot) {
-      if (t < this.cooldownUntil || t < this.suspendUntil) return;
+    // Новые броски: мяч поднялся выше кольца рядом с ним.
+    if (t >= this.suspendUntil) {
       for (const tr of this.tracks) {
         if (tr.used || tr.pts.length < 3 || tr.lastSeen !== t) continue;
         const p = tr.pts[tr.pts.length - 1];
-        if (p.y < cy - 0.25 * D && Math.abs(p.x - cx) < 3 * W && tr.travel > 1.5 * D) {
-          tr.used = true;
-          this.shot = {
-            track: tr,
-            start: t,
-            near: false,
-            crossIn: null,
-            rimTouch: false,
-            last: p,
-            lastSeen: t,
-            netPeak: 0,
-            pts: [p],
-          };
-          break;
-        }
+        if (!(p.y < cy - 0.25 * D && Math.abs(p.x - cx) < 3 * W && tr.travel > 1.5 * D)) continue;
+        // Мяч в полёте над кольцом не стоит на месте; неподвижное пятно — «призрак» в модели фона
+        // (мяч завис на верхней точке отскока и частично впечатался в фон).
+        const back = tr.pts[Math.max(0, tr.pts.length - 4)];
+        if (Math.hypot(p.x - back.x, p.y - back.y) < 0.5 * D) continue;
+        // Осколок уже отслеживаемого мяча (мяч разрезан ободом/сеткой) — не новый бросок.
+        if (this.shots.some((o) => Math.hypot(o.last.x - p.x, o.last.y - p.y) < 1.5 * D)) continue;
+        // Тот же мяч сразу после решения (отскок, повторный захват) — не новый бросок.
+        if (this._dead.some((z) => Math.hypot(z.x - p.x, z.y - p.y) < z.r)) continue;
+        tr.used = true;
+        this.shots.push({ track: tr, start: t, near: false, crossIn: null, rimTouch: false, last: p, lastSeen: t, netPeak: 0, pts: [p] });
       }
-      if (!this.shot) return;
     }
+  }
 
-    const s = this.shot;
+  /** Мяч ушёл за верхний край кадра на высокой дуге — вернётся сверху. */
+  _exitedTop(s) {
+    return s.last.y < this.h * 0.08 && (s.track.vy || 0) < 0;
+  }
+
+  _stepShot(s, t, events) {
+    const R = this.rim;
+    const cx = R.cx, cy = R.cy, W = R.w, hw = W / 2, D = W * BALL_TO_RIM;
     const decide = (type) => {
-      this.shot = null;
-      this.cooldownUntil = t + 700;
+      this.shots.splice(this.shots.indexOf(s), 1);
+      this._dead.push({ x: s.last.x, y: s.last.y, r: 2 * W, until: t + 900 });
       if (type !== 'cancel') events.push({ type, t, pts: s.pts });
     };
 
     // Если мяч потерян (перекрыт кольцом/щитом), подхватываем новый трек рядом с последней позицией.
-    if (!this.tracks.includes(s.track) || s.track.lastSeen !== t) {
+    // Ищем только там, где по физике должен оказаться потерянный мяч (скорость + гравитация):
+    // в групповой тренировке рядом летают чужие мячи, и «ближайший» трек часто не тот.
+    const exited = this._exitedTop(s);
+    if ((!this.tracks.includes(s.track) || s.track.lastSeen !== t) && t - s.lastSeen < (exited ? 2500 : 800)) {
+      const gap = (t - s.lastSeen) / 1000;
+      const g = 9.8 * (W / 0.457);
+      const vx = s.track.vx || 0, vy = s.track.vy || 0;
+      const px = s.last.x + vx * gap, py = s.last.y + vy * gap + 0.5 * g * gap * gap;
+      const gate = 1.5 * D + 0.5 * Math.hypot(vx, vy) * gap + 0.5 * g * gap * gap;
+      let bestO = null, bestD = gate;
       for (const o of this.tracks) {
-        if (o === s.track || o.lastSeen !== t || o.pts.length > 5) continue;
-        if (o.used && o !== s.track) continue;
+        if (o === s.track || o.used || o.lastSeen !== t || o.pts.length > 5) continue;
         const p = o.pts[o.pts.length - 1];
-        if (Math.hypot(p.x - s.last.x, p.y - s.last.y) < 2.5 * W && t - s.lastSeen < 800) {
-          s.track = o;
-          o.used = true;
-          break;
+        if (s.crossIn && p.y < cy - 0.5 * D) continue; // мяч уже прошёл обод вниз — выше кольца его быть не может
+        if (exited) {
+          // вернулся сверху: трек начался у верхнего края, по горизонтали — где и должен быть
+          const first = o.pts[0];
+          const dx = Math.abs(first.x - (s.last.x + vx * ((first.t - s.lastSeen) / 1000)));
+          if (first.y < this.h * 0.15 && dx < 1.5 * W && dx < bestD) {
+            bestD = dx;
+            bestO = o;
+          }
+          continue;
         }
+        // Падающий мяч не может вдруг полететь вверх вдали от кольца (разворот — только отскок от обода/щита).
+        if (vy > 0 && (o.vy || 0) < -Math.abs(vy) * 0.3 && Math.hypot(p.x - cx, p.y - cy) > 1.6 * W && p.y < this.h * 0.8) continue;
+        const d = Math.hypot(p.x - px, p.y - py);
+        if (d < bestD) {
+          bestD = d;
+          bestO = o;
+        }
+      }
+      if (bestO) {
+        s.track = bestO;
+        bestO.used = true;
+        s.adoptedAt = t;
+        if (exited) s.last = bestO.pts[0]; // не считать возврат из-за кадра «скачком»
       }
     }
 
@@ -576,6 +628,21 @@ export class ShotDetector {
     if (tr.lastSeen === t) {
       const p = tr.pts[tr.pts.length - 1];
       const q = s.last;
+      // Мяч не может полсекунды стоять на месте: даже на верхней точке отскока гравитация сдвигает его
+      // на ~0.5 диаметра. Неподвижное пятно — призрак в фоне; такие точки не считаем наблюдением мяча.
+      let spread = 0, i0 = tr.pts.length - 1;
+      while (i0 > 0 && t - tr.pts[i0 - 1].t <= 500) i0--;
+      if (t - tr.pts[i0].t >= 400) {
+        for (let i = i0; i < tr.pts.length; i++) spread = Math.max(spread, Math.hypot(tr.pts[i].x - p.x, tr.pts[i].y - p.y));
+        if (spread < 0.3 * D) return this._timeouts(s, t, decide);
+      }
+      // Точка, физически недостижимая для этого мяча, — это другой объект: не учитываем.
+      const gapS = Math.max(0.02, (t - s.lastSeen) / 1000 || 0.033);
+      const reach = 2 * D + Math.hypot(tr.vx, tr.vy) * gapS * 1.5 + 9.8 * (W / 0.457) * gapS * gapS;
+      if (s.pts.length > 1 && s.adoptedAt !== t && Math.hypot(p.x - q.x, p.y - q.y) > reach) {
+        s.track = { lastSeen: -1, vx: tr.vx, vy: tr.vy, pts: [q] };
+        return this._timeouts(s, t, decide);
+      }
       s.last = p;
       s.lastSeen = t;
       s.pts.push(p);
@@ -600,15 +667,21 @@ export class ShotDetector {
       if (Math.abs(p.x - cx) > 5 * W) return decide(s.near ? 'miss' : 'cancel');
     }
 
+    return this._timeouts(s, t, decide);
+  }
+
+  _timeouts(s, t, decide) {
+    const R = this.rim;
+    const cx = R.cx, cy = R.cy, W = R.w, hw = W / 2;
     if (s.near || s.crossIn) s.netPeak = Math.max(s.netPeak, this.netScore);
 
     const lostFor = t - s.lastSeen;
     if (s.crossIn) {
       // Мяч прошёл обод вниз и пропал в сетке / не вернулся — попадание.
       if (lostFor > 450 || t - s.crossIn.t > 900) return decide('make');
-    } else if (lostFor > 900) {
+    } else if (lostFor > (this._exitedTop(s) ? 2500 : 900)) {
       const p = s.last;
-      const descending = tr.vy > 0;
+      const descending = s.track.vy > 0;
       if (p.y < cy + 0.3 * W && Math.abs(p.x - cx) < hw && descending && s.netPeak > 0.12) return decide('make');
       return decide(s.near ? 'miss' : 'cancel');
     }

@@ -150,15 +150,35 @@ export class RimFinder {
     return c;
   }
 
-  /** Уточнить строку обода — максимум горизонтальных краёв около верха сетки. */
+  /**
+   * Уточнить высоту обода (плоскость кольца): находим, где начинается плетение сетки, и берём центр
+   * горизонтальных линий обода вокруг этого места. Эллипс обода даёт две линии (задняя и передняя дуги),
+   * середина между ними — плоскость кольца. Самая сильная горизонталь бывает узлами сетки — не годится.
+   */
   _refine(c) {
-    let row = c.cy, bestH = -1;
-    for (let y = Math.round(c.cy - c.w * 0.2); y <= c.cy + c.w * 0.15; y++) {
-      const v = this._box(this.iH, c.cx - c.w * 0.42, y, c.cx + c.w * 0.42, y + 1);
-      if (v > bestH) {
-        bestH = v;
-        row = y;
-      }
+    const { iD, iH } = this;
+    const x0 = c.cx - c.w * 0.38, x1 = c.cx + c.w * 0.38, band = Math.max(2, c.w * 0.25);
+    const ys = [], below = [], line = [];
+    for (let y = Math.round(c.cy - c.w * 0.45); y <= c.cy + c.w * 0.35; y++) {
+      const b = this._box(iD, x0, y, x1, y + band);
+      if (b < 0) continue;
+      ys.push(y);
+      below.push(b);
+      line.push(Math.max(0, this._box(iH, c.cx - c.w * 0.42, y - 1, c.cx + c.w * 0.42, y + 2)));
+    }
+    let row = c.cy;
+    if (ys.length) {
+      const mx = Math.max(...below);
+      const k = below.findIndex((v) => v >= mx * 0.5);
+      const onset = ys[Math.max(0, k)];
+      let sw = 0, sy = 0;
+      ys.forEach((y, i) => {
+        if (y >= onset - c.w * 0.15 && y <= onset + c.w * 0.2) {
+          sw += line[i];
+          sy += line[i] * y;
+        }
+      });
+      row = sw > 0.3 ? sy / sw : onset;
     }
     return { cx: c.cx, cy: row, w: c.w, h: Math.max(2, c.w * 0.2), total: c.total, board: c.board, dN: c.dN };
   }

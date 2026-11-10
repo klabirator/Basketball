@@ -1100,12 +1100,13 @@ function draw() {
     }
   }
 
-  // траектория текущего броска
-  if (res.shot?.pts?.length > 1) {
+  // траектории текущих бросков (в групповой тренировке их может быть несколько одновременно)
+  for (const sh of res.shots || []) {
+    if (sh.pts.length < 2) continue;
     vctx.strokeStyle = '#ff9a3c';
     vctx.lineWidth = lw * 1.4;
     vctx.beginPath();
-    res.shot.pts.forEach((p, i) => {
+    sh.pts.forEach((p, i) => {
       const [x, y] = P(p.x, p.y);
       i ? vctx.lineTo(x, y) : vctx.moveTo(x, y);
     });
@@ -1117,7 +1118,7 @@ function draw() {
     const p = tr.pts[tr.pts.length - 1];
     if (!settings.showDebug && !(tr.travel > tr.d * 1.5 && tr.pts.length > 2)) continue;
     const [x, y] = P(p.x, p.y);
-    vctx.strokeStyle = res.shot?.track === tr ? '#ff9a3c' : 'rgba(255,255,255,.7)';
+    vctx.strokeStyle = res.shots?.some((sh) => sh.track === tr) ? '#ff9a3c' : 'rgba(255,255,255,.7)';
     vctx.lineWidth = lw;
     vctx.beginPath();
     vctx.arc(x, y, (tr.d / 2) * fit.s + lw * 2, 0, Math.PI * 2);

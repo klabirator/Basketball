@@ -143,3 +143,42 @@ test('поиск по форме: разные размеры, ориентац�
     assert.ok(Math.hypot(r.cx - sc.rim.cx, r.cy - sc.rim.cy) < sc.rim.w * 0.4, `${W}x${H} rim ${sc.rim.w}: ${JSON.stringify(r)}`);
   }
 });
+
+// ── Групповая тренировка: несколько мячей в воздухе одновременно, подбор под кольцом, ведение ──
+import { crowdScenario, evaluate } from './crowd.mjs';
+
+function runCrowd(opts) {
+  const scene = makeScene(400, 225);
+  const sc = crowdScenario(scene, opts);
+  const det = new ShotDetector({ colorAutoLock: false });
+  const loc = new RimLocator();
+  const events = [];
+  let f = 0;
+  for (const { data, t } of sc.frames()) {
+    for (const e of det.process(data, 400, 225, t).events) events.push({ type: e.type, t });
+    if (f++ % 18 === 0) {
+      const g = new Uint8Array(400 * 225);
+      for (let i = 0; i < g.length; i++) g[i] = (data[i * 4] * 77 + data[i * 4 + 1] * 150 + data[i * 4 + 2] * 29) >> 8;
+      det.offerRim(loc.locate(g, 400, 225, det._rimCand));
+    }
+  }
+  return evaluate(sc.truth, events);
+}
+
+test('один игрок с высокими дугами (мяч уходит за верх кадра, отскоки от дужки)', () => {
+  const r = runCrowd({ shooters: 1, gap: 3, walkers: 0, rebounders: false, seed: 29, duration: 30 });
+  assert.equal(r.correct, r.total, JSON.stringify(r.details));
+  assert.equal(r.extra, 0, JSON.stringify(r.details));
+});
+
+test('двое бросают по очереди и одновременно, рядом ходят люди', () => {
+  const r = runCrowd({ shooters: 2, gap: 4, walkers: 2, rebounders: false, seed: 3, duration: 30 });
+  assert.ok(r.correct / r.total >= 0.95, `верно ${r.correct}/${r.total}: ${JSON.stringify(r.details)}`);
+  assert.equal(r.extra, 0, JSON.stringify(r.details));
+});
+
+test('четверо, игрок прыгает на подбор под кольцом, ведут мяч (~1 бросок/с)', () => {
+  const r = runCrowd({ shooters: 4, gap: 4, walkers: 3, rebounders: true, dribblers: 1, seed: 11, duration: 30 });
+  assert.ok(r.correct / r.total >= 0.8, `верно ${r.correct}/${r.total}: ${JSON.stringify(r.details)}`);
+  assert.ok(r.extra <= 2, `лишних ${r.extra}: ${JSON.stringify(r.details)}`);
+});
